@@ -1,0 +1,2 @@
+checkpoint,checkpoint_epoch,test_images,test_patients,accuracy,precision,recall,f1_score,roc_auc
+models\baseline_efficientnetb0_best.pth,12,307,123,0.8469055374592834,0.8547486033519553,0.8793103448275862,0.8668555240793201,0.9220032840722495

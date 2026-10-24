@@ -1,0 +1,2 @@
+input_image_format,output_image_size,number_of_channels,normalization_method,training_augmentations,validation_test_method,output_array_format
+OCT image read by Pillow; source converted to grayscale,224 x 224 pixels,3,"ImageNet mean [0.485, 0.456, 0.406] and std [0.229, 0.224, 0.225] after scaling to [0, 1]",rotation +/-5 degrees; brightness/contrast +/-10%; translation up to 3%; no flips/crops/warps,grayscale to RGB; resize with LANCZOS; ImageNet normalization; no augmentation,"float32 CHW tensor with shape (3, 224, 224)"

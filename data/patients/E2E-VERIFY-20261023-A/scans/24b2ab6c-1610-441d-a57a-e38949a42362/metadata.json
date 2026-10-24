@@ -1,0 +1,17 @@
+{
+  "scan_id": "24b2ab6c-1610-441d-a57a-e38949a42362",
+  "patient_id": "E2E-VERIFY-20261023-A",
+  "uploaded_at": "2026-10-23T20:29:52.353673+00:00",
+  "scan_date": null,
+  "eye_side": "left",
+  "prediction": "AMD",
+  "amd_probability": 0.5099449753761292,
+  "class_probabilities": {
+    "Non-AMD": 0.490055,
+    "AMD": 0.509945
+  },
+  "model_version": "baseline_efficientnetb0_best:epoch-12",
+  "notes": null,
+  "image_extension": "jpg",
+  "image_path": "data/patients/E2E-VERIFY-20261023-A/scans/24b2ab6c-1610-441d-a57a-e38949a42362/original.jpg"
+}

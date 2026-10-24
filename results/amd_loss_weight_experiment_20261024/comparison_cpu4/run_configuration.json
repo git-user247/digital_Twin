@@ -1,0 +1,31 @@
+{
+  "candidate_weights": {
+    "baseline_0_664336": 0.664336,
+    "unweighted_1_0": 1.0,
+    "amd_positive_1_5": 1.5
+  },
+  "seed": 42,
+  "batch_size": 16,
+  "num_workers": 0,
+  "learning_rate": 0.0001,
+  "max_epochs": 12,
+  "early_stopping_patience": 4,
+  "augmentation": "existing preprocess_image augment=True, np.random.default_rng(seed+index)",
+  "threshold": 0.5,
+  "device": "cpu",
+  "torch_num_threads": 4,
+  "initialization": "EfficientNet_B0_Weights.DEFAULT cached ImageNet weights; frozen feature extractor; Dropout(0.30)+Linear(1280,1); reset seed each candidate",
+  "selection": "highest validation ROC-AUC; if unavailable negative validation loss; strict improvement; patience 4",
+  "data_accessed": [
+    "data/Processed/train.csv",
+    "data/Processed/validation.csv"
+  ],
+  "test_split_accessed": false,
+  "patient_overlap_train_validation": 0,
+  "train_rows": 1428,
+  "validation_rows": 327,
+  "train_patients": 574,
+  "validation_patients": 123,
+  "train_split_sha256": "abacada29bf957c06d5fe4aa050ba48685b7995084a645e533612a00754af759",
+  "validation_split_sha256": "b13354f6287bb1e0d225ae291939b97d06fba90bca0df105219058b76b3ca8aa"
+}

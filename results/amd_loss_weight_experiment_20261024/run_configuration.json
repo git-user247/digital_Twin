@@ -1,0 +1,27 @@
+{
+  "candidate_weights": {
+    "baseline_0_664336": 0.6643356643356644,
+    "unweighted_1_0": 1.0,
+    "amd_positive_1_5": 1.5
+  },
+  "seed": 42,
+  "batch_size": 16,
+  "num_workers": 0,
+  "learning_rate": 0.0001,
+  "max_epochs": 12,
+  "early_stopping_patience": 4,
+  "augmentation": "existing preprocess_image with augment=True and np.random.default_rng(seed+index)",
+  "threshold": 0.5,
+  "device": "cpu",
+  "initialization": "EfficientNet_B0_Weights.DEFAULT cached ImageNet weights; frozen feature extractor; replacement Dropout(0.30)+Linear(1280,1) head; reset seed before each run",
+  "selection": "highest validation ROC-AUC; if unavailable, negative validation loss; strict improvement; patience 4",
+  "data_accessed": [
+    "data/Processed/train.csv",
+    "data/Processed/validation.csv"
+  ],
+  "test_split_accessed": false,
+  "production_checkpoint_modified": false,
+  "training_split_sha256": "abacada29bf957c06d5fe4aa050ba48685b7995084a645e533612a00754af759",
+  "validation_split_sha256": "b13354f6287bb1e0d225ae291939b97d06fba90bca0df105219058b76b3ca8aa",
+  "pretrained_weights_sha256": "7f5810bc96def8f7552d5b7e68d53c4786f81167d28291b21c0d90e1fca14934"
+}
