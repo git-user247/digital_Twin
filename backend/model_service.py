@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from src.oct_preprocessing import IMAGE_SIZE, preprocess_pil_image
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODEL_PATH = PROJECT_ROOT / "models" / "baseline_efficientnetb0_best.pth"
 CLASS_NAMES = ["Non-AMD", "AMD"]
+logger = logging.getLogger(__name__)
 MODEL_METADATA = {
     "checkpoint": str(MODEL_PATH),
     "architecture": "EfficientNetB0",
@@ -43,8 +45,18 @@ class ModelService:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model: torch.nn.Module | None = None
         self.model_ready = False
+        self.load_error: str | None = None
         self.model_version = self.model_path.stem
-        self.load_model()
+        try:
+            self.load_model()
+        except Exception:
+            self.model = None
+            self.model_ready = False
+            self.load_error = (
+                "Unable to load the configured model checkpoint. Check that it exists and is compatible; "
+                "see backend logs for details."
+            )
+            logger.exception("Unable to load model checkpoint %s.", self.model_path)
 
     def load_model(self) -> None:
         if not self.model_path.exists():

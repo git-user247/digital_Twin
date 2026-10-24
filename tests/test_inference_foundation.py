@@ -66,6 +66,16 @@ class InferenceModelTests(unittest.TestCase):
         self.assertFalse(self.service.model.training)
         self.assertEqual(self.service.model.classifier[1].out_features, 1)
 
+    def test_missing_checkpoint_keeps_service_available_but_not_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing_checkpoint = Path(directory) / "missing.pth"
+            with self.assertLogs("backend.model_service", level="ERROR"):
+                service = ModelService(missing_checkpoint)
+
+        self.assertFalse(service.model_ready)
+        self.assertIsNone(service.model)
+        self.assertIn("Unable to load", service.load_error)
+
     def test_valid_oct_preprocessing_has_expected_tensor_shape(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "oct.png"
@@ -131,6 +141,8 @@ class UploadValidationTests(unittest.IsolatedAsyncioTestCase):
         self.temp_directory = tempfile.TemporaryDirectory()
         self.history_path = Path(self.temp_directory.name) / "patient_history.json"
         self.fake_service = unittest.mock.Mock()
+        self.fake_service.model_ready = True
+        self.fake_service.load_error = None
         self.fake_service.predict_pil_image.return_value = {
             "prediction": "AMD",
             "probability": 0.7,
@@ -211,6 +223,16 @@ class UploadValidationTests(unittest.IsolatedAsyncioTestCase):
                 await self._call_endpoint("predict", _upload(self.image))
         self.assertEqual(caught.exception.status_code, 500)
         self.assertNotIn("internal checkpoint detail", caught.exception.detail)
+
+    async def test_unavailable_model_returns_service_unavailable(self) -> None:
+        self.fake_service.model_ready = False
+        self.fake_service.load_error = "Model checkpoint is unavailable."
+        with self.assertRaises(HTTPException) as caught:
+            await self._call_endpoint("predict", _upload(self.image))
+
+        self.assertEqual(caught.exception.status_code, 503)
+        self.assertEqual(caught.exception.detail, "Model checkpoint is unavailable.")
+        self.fake_service.predict_pil_image.assert_not_called()
 
 
 if __name__ == "__main__":

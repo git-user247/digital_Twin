@@ -18,8 +18,9 @@ import {
   X,
 } from 'lucide-react'
 
-const API_BASE = 'http://127.0.0.1:8000'
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/+$/, '')
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+const SELECTED_PATIENT_KEY = 'ocutwin.selectedPatientId'
 const navItems = [
   { label: 'Dashboard', icon: LayoutDashboard },
   { label: 'Image analysis', icon: ScanLine },
@@ -80,12 +81,48 @@ function App() {
       .then((info) => {
         if (!mounted) return
         setModelInfo(info)
-        setBackendStatus(info.ready ? 'ready' : 'offline')
+        setBackendStatus(info.ready ? 'ready' : 'model-unavailable')
       })
       .catch(() => {
         if (!mounted) return
         setBackendStatus('offline')
       })
+    return () => { mounted = false }
+  }, [])
+
+  useEffect(() => {
+    let mounted = true
+    let storedPatientId
+    try {
+      storedPatientId = window.localStorage.getItem(SELECTED_PATIENT_KEY)?.trim()
+    } catch {
+      setProfileError('This browser could not restore the selected patient from local storage.')
+      return () => { mounted = false }
+    }
+
+    if (!storedPatientId) return () => { mounted = false }
+
+    setPatientId(storedPatientId)
+    setProfileBusy(true)
+    fetch(`${API_BASE}/patients/${encodeURIComponent(storedPatientId)}`)
+      .then((response) => readResponse(response, 'Unable to restore the selected patient profile.'))
+      .then(async (payload) => {
+        if (!mounted) return
+        setPatient(payload.patient)
+        setPatientId(payload.patient.patient_id)
+        setProfileMessage('Patient profile restored from local storage.')
+        await loadPatientScans(payload.patient.patient_id)
+      })
+      .catch((requestError) => {
+        if (!mounted) return
+        setPatient(null)
+        setScans([])
+        setProfileError(requestError.message || 'Unable to restore the selected patient profile.')
+      })
+      .finally(() => {
+        if (mounted) setProfileBusy(false)
+      })
+
     return () => { mounted = false }
   }, [])
 
@@ -126,7 +163,15 @@ function App() {
       const payload = await readResponse(response, 'Unable to load the patient profile.')
       setPatient(payload.patient)
       setPatientId(payload.patient.patient_id)
-      setProfileMessage('Patient profile loaded from local storage.')
+      let remembered = true
+      try {
+        window.localStorage.setItem(SELECTED_PATIENT_KEY, payload.patient.patient_id)
+      } catch {
+        remembered = false
+      }
+      setProfileMessage(remembered
+        ? 'Patient profile loaded and will be restored after refresh.'
+        : 'Patient profile loaded, but this browser could not remember it for refresh.')
       await loadPatientScans(payload.patient.patient_id)
     } catch (requestError) {
       setProfileError(requestError.message || 'Unable to load the patient profile.')
@@ -156,7 +201,15 @@ function App() {
       setPatientId(payload.patient.patient_id)
       setScans([])
       setSavedScan(null)
-      setProfileMessage('Patient profile created and confirmed by the backend.')
+      let remembered = true
+      try {
+        window.localStorage.setItem(SELECTED_PATIENT_KEY, payload.patient.patient_id)
+      } catch {
+        remembered = false
+      }
+      setProfileMessage(remembered
+        ? 'Patient profile created and will be restored after refresh.'
+        : 'Patient profile created, but this browser could not remember it for refresh.')
     } catch (requestError) {
       setPatient(null)
       setProfileError(requestError.message || 'Unable to create the patient profile.')
@@ -318,7 +371,7 @@ function App() {
           <button className="mobile-menu" onClick={() => setIsSidebarOpen(true)} aria-label="Open navigation"><Menu size={21} /></button>
           <div className="breadcrumb"><span>Workspace</span><ChevronRight size={14} /><strong>{activeNav?.label || 'Dashboard'}</strong></div>
           <div className="topbar-actions">
-            <span className="live-dot"><i /> {backendStatus === 'ready' ? 'Model ready' : backendStatus === 'offline' ? 'Backend unavailable' : 'Checking backend'}</span>
+            <span className="live-dot"><i /> {backendStatus === 'ready' ? 'Model ready' : backendStatus === 'model-unavailable' ? 'Model unavailable' : backendStatus === 'offline' ? 'Backend unavailable' : 'Checking backend'}</span>
           </div>
         </header>
 
@@ -458,7 +511,7 @@ function App() {
               <p className="eyebrow"><span className="eyebrow-line" /> System context</p>
               <h2>Research prototype<br /><em>with explicit limits.</em></h2>
               <p>This local application connects persistent patient records to the existing binary OCT classifier. It has no user authentication and is not for clinical use or identifiable patient data.</p>
-              <div className="project-status"><span className="status-pulse" /> {backendStatus === 'ready' ? 'Backend reports model ready' : backendStatus === 'offline' ? 'Backend unavailable' : 'Checking backend'}</div>
+              <div className="project-status"><span className="status-pulse" /> {backendStatus === 'ready' ? 'Backend reports model ready' : backendStatus === 'model-unavailable' ? 'Backend is running, but model inference is unavailable' : backendStatus === 'offline' ? 'Backend unavailable' : 'Checking backend'}</div>
             </div>
             <div className="panel status-panel">
               <div className="status-panel-head"><div><span className="eyebrow-small">Model information</span><h3>{modelInfo?.model?.architecture || 'Model information unavailable'}</h3></div><span className="status-tag"><i /> {modelInfo?.ready ? 'Ready' : 'Unavailable'}</span></div>
@@ -468,6 +521,7 @@ function App() {
                 <div><span>Classes</span><strong>{modelInfo?.model?.classes?.join(' / ') || 'Not available'}</strong></div>
                 <div><span>Checkpoint</span><strong>{modelInfo?.checkpoint_exists ? 'Found' : 'Not confirmed'}</strong></div>
               </div>
+              {modelInfo?.error && <div className="error-box" role="status">{modelInfo.error}</div>}
               <div className="quality-bar"><div><span>Clinical risk score</span><b>Not provided</b></div><p>Saved probabilities are classifier outputs and should not be interpreted as calibrated clinical risk.</p></div>
             </div>
           </section>

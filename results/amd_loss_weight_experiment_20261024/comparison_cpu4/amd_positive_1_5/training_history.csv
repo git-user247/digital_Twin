@@ -1,0 +1,2 @@
+epoch,train_loss,validation_loss,validation_accuracy,validation_sensitivity,validation_specificity,validation_precision,validation_f1,validation_roc_auc,validation_pr_auc
+1,0.8133278307126683,0.7465350194079431,0.6024464831804281,1.0,0.0,0.6024464831804281,0.7519083969465649,0.7684107770402188,0.8153028714022095

@@ -134,6 +134,14 @@ def _save_history(history: dict) -> None:
         json.dump(history, handle, indent=2)
 
 
+def _require_model_ready() -> None:
+    if not model_service.model_ready:
+        raise HTTPException(
+            status_code=503,
+            detail=model_service.load_error or "The model is unavailable. Check the backend logs.",
+        )
+
+
 def _store_patient_observation(patient_code: str | None, payload: dict) -> None:
     if not patient_code:
         return
@@ -199,7 +207,7 @@ async def _read_validated_image(file: UploadFile) -> tuple[Image.Image, bytes, s
 @app.get("/health")
 def health_check() -> dict:
     return {
-        "status": "ok",
+        "status": "ok" if model_service.model_ready else "degraded",
         "model_ready": model_service.model_ready,
         "device": str(model_service.device),
         "timestamp": _utc_now(),
@@ -213,6 +221,7 @@ def model_info() -> dict:
         "model": MODEL_METADATA,
         "ready": model_service.model_ready,
         "checkpoint_exists": model_service.model_path.exists(),
+        "error": model_service.load_error,
     }
 
 
@@ -299,6 +308,7 @@ async def save_patient_scan(
         raise HTTPException(status_code=422, detail="Notes must be 2000 characters or fewer.")
 
     image, original_bytes, image_format = await _read_validated_image(file)
+    _require_model_ready()
     try:
         result = model_service.predict_pil_image(image)
     except Exception as exc:
@@ -402,6 +412,7 @@ def get_patient_scan_image(patient_id: str, scan_id: str) -> FileResponse:
 async def predict_image(file: UploadFile = File(...), patient_code: str = Form(default="")) -> dict:
     image, _, _ = await _read_validated_image(file)
 
+    _require_model_ready()
     try:
         result = model_service.predict_pil_image(image)
     except Exception as exc:
@@ -425,6 +436,7 @@ async def predict_image(file: UploadFile = File(...), patient_code: str = Form(d
 async def gradcam(file: UploadFile = File(...)) -> dict:
     image, _, _ = await _read_validated_image(file)
 
+    _require_model_ready()
     try:
         overlay = model_service.generate_gradcam(image)
     except Exception as exc:

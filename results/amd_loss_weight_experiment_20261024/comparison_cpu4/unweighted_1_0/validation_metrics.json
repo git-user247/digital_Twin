@@ -1,0 +1,51 @@
+{
+  "candidate": "unweighted_1_0",
+  "pos_weight": 1.0,
+  "selected_epoch": 12,
+  "epochs_run": 12,
+  "image_level": {
+    "accuracy": 0.8012232415902141,
+    "sensitivity": 0.9289340101522843,
+    "specificity": 0.6076923076923076,
+    "precision": 0.782051282051282,
+    "f1": 0.8491879350348028,
+    "roc_auc": 0.9090199140960562,
+    "pr_auc": 0.9403684774108083,
+    "confusion_matrix": [
+      [
+        79,
+        51
+      ],
+      [
+        14,
+        183
+      ]
+    ],
+    "threshold": 0.5,
+    "n_images": 327
+  },
+  "patient_mean_probability_summary": {
+    "aggregation": "mean image probability per patient; patient target=max image target",
+    "metrics": {
+      "accuracy": 0.7723577235772358,
+      "sensitivity": 0.9206349206349206,
+      "specificity": 0.6166666666666667,
+      "precision": 0.7160493827160493,
+      "f1": 0.8055555555555556,
+      "roc_auc": 0.8825396825396825,
+      "pr_auc": 0.8936468623676868,
+      "confusion_matrix": [
+        [
+          37,
+          23
+        ],
+        [
+          5,
+          58
+        ]
+      ],
+      "threshold": 0.5,
+      "n_images": 123
+    }
+  }
+}
