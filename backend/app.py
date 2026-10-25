@@ -11,13 +11,14 @@ import warnings
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from PIL import Image, UnidentifiedImageError
 
 from backend.model_service import MODEL_METADATA, ModelService
+from backend.auth import TOKEN_TTL_SECONDS, require_doctor_auth, verify_doctor_credentials
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PATIENT_HISTORY_PATH = PROJECT_ROOT / "data" / "patient_history.json"
@@ -44,7 +45,28 @@ model_service = ModelService()
 
 class PatientCreate(BaseModel):
     patient_id: str
+    name: str = Field(min_length=1, max_length=120)
+    age: int = Field(ge=0, le=120, strict=True)
+    sex: str | None = Field(default=None, max_length=32)
+    contact: str | None = Field(default=None, max_length=200)
     notes: str | None = Field(default=None, max_length=MAX_NOTES_LENGTH)
+
+    @field_validator("patient_id", "name", mode="before")
+    @classmethod
+    def trim_required_text(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("sex", "contact", "notes", mode="before")
+    @classmethod
+    def trim_optional_text(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
+
+
+class DoctorLogin(BaseModel):
+    doctor_id: str = Field(min_length=1, max_length=254)
+    password: str = Field(min_length=1, max_length=1024)
 
 
 def _utc_now() -> str:
@@ -225,8 +247,23 @@ def model_info() -> dict:
     }
 
 
+@app.post("/auth/login")
+def doctor_login(credentials: DoctorLogin) -> dict:
+    access_token = verify_doctor_credentials(credentials.doctor_id, credentials.password)
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "expires_in": TOKEN_TTL_SECONDS,
+    }
+
+
+@app.get("/auth/me")
+def current_doctor(doctor_id: str = Depends(require_doctor_auth)) -> dict:
+    return {"doctor_id": doctor_id}
+
+
 @app.get("/patient-history")
-def patient_history(patient_code: str | None = None) -> dict:
+def patient_history(patient_code: str | None = None, _: str = Depends(require_doctor_auth)) -> dict:
     if not patient_code:
         return {"patient_code": None, "observations": []}
     history = _load_history().get(patient_code.strip(), [])
@@ -234,7 +271,7 @@ def patient_history(patient_code: str | None = None) -> dict:
 
 
 @app.post("/patients", status_code=201)
-def create_patient(patient: PatientCreate) -> dict:
+def create_patient(patient: PatientCreate, _: str = Depends(require_doctor_auth)) -> dict:
     patient_id = _validate_patient_id(patient.patient_id)
     patient_directory = PATIENTS_ROOT / patient_id
     try:
@@ -248,6 +285,10 @@ def create_patient(patient: PatientCreate) -> dict:
     profile = {
         "patient_id": patient_id,
         "created_at": _utc_now(),
+        "name": patient.name,
+        "age": patient.age,
+        "sex": patient.sex,
+        "contact": patient.contact,
         "notes": patient.notes,
     }
     try:
@@ -262,8 +303,70 @@ def create_patient(patient: PatientCreate) -> dict:
     return {"status": "ok", "patient": profile}
 
 
+@app.get("/patients")
+def list_patients(_: str = Depends(require_doctor_auth)) -> dict:
+    patients = []
+    if not PATIENTS_ROOT.is_dir():
+        return {"patients": patients}
+
+    for patient_directory in PATIENTS_ROOT.iterdir():
+        if not patient_directory.is_dir():
+            continue
+        profile_path = patient_directory / "profile.json"
+        if not profile_path.is_file():
+            continue
+
+        patient_id = _validate_patient_id(patient_directory.name)
+        try:
+            with profile_path.open("r", encoding="utf-8") as handle:
+                profile = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.exception("Unable to read patient profile for directory listing.")
+            raise HTTPException(status_code=500, detail="Patient directory is unavailable.") from exc
+        if not isinstance(profile, dict) or profile.get("patient_id") != patient_id:
+            raise HTTPException(status_code=500, detail="Patient directory is unavailable.")
+
+        scans_directory = patient_directory / "scans"
+        scan_records = []
+        if scans_directory.is_dir():
+            for scan_directory in scans_directory.iterdir():
+                if scan_directory.is_dir():
+                    scan_records.append(_load_scan_metadata(patient_id, scan_directory))
+
+        latest_scan = max(scan_records, key=lambda record: record["uploaded_at"], default=None)
+        if latest_scan is not None:
+            latest_scan = {
+                field: latest_scan.get(field)
+                for field in (
+                    "scan_id",
+                    "uploaded_at",
+                    "scan_date",
+                    "eye_side",
+                    "prediction",
+                    "amd_probability",
+                    "class_probabilities",
+                    "model_version",
+                )
+            }
+
+        patients.append(
+            {
+                "patient_id": patient_id,
+                "created_at": profile.get("created_at"),
+                "name": profile.get("name"),
+                "age": profile.get("age"),
+                "sex": profile.get("sex"),
+                "scan_count": len(scan_records),
+                "latest_scan": latest_scan,
+            }
+        )
+
+    patients.sort(key=lambda patient: patient["patient_id"].casefold())
+    return {"patients": patients}
+
+
 @app.get("/patients/{patient_id}")
-def get_patient(patient_id: str) -> dict:
+def get_patient(patient_id: str, _: str = Depends(require_doctor_auth)) -> dict:
     patient_id = _validate_patient_id(patient_id)
     profile_path = PATIENTS_ROOT / patient_id / "profile.json"
     if not profile_path.is_file():
@@ -284,6 +387,7 @@ async def save_patient_scan(
     eye_side: str = Form(...),
     scan_date: str | None = Form(default=None),
     notes: str | None = Form(default=None),
+    _: str = Depends(require_doctor_auth),
 ) -> dict:
     patient_id = _validate_patient_id(patient_id)
     patient_directory = PATIENTS_ROOT / patient_id
@@ -370,7 +474,7 @@ async def save_patient_scan(
 
 
 @app.get("/patients/{patient_id}/scans")
-def get_patient_scans(patient_id: str) -> dict:
+def get_patient_scans(patient_id: str, _: str = Depends(require_doctor_auth)) -> dict:
     patient_id = _validate_patient_id(patient_id)
     patient_directory = PATIENTS_ROOT / patient_id
     if not (patient_directory / "profile.json").is_file():
@@ -387,7 +491,11 @@ def get_patient_scans(patient_id: str) -> dict:
 
 
 @app.get("/patients/{patient_id}/scans/{scan_id}/image")
-def get_patient_scan_image(patient_id: str, scan_id: str) -> FileResponse:
+def get_patient_scan_image(
+    patient_id: str,
+    scan_id: str,
+    _: str = Depends(require_doctor_auth),
+) -> FileResponse:
     patient_id = _validate_patient_id(patient_id)
     try:
         normalized_scan_id = str(uuid.UUID(scan_id))
@@ -409,7 +517,11 @@ def get_patient_scan_image(patient_id: str, scan_id: str) -> FileResponse:
 
 
 @app.post("/predict")
-async def predict_image(file: UploadFile = File(...), patient_code: str = Form(default="")) -> dict:
+async def predict_image(
+    file: UploadFile = File(...),
+    patient_code: str = Form(default=""),
+    _: str = Depends(require_doctor_auth),
+) -> dict:
     image, _, _ = await _read_validated_image(file)
 
     _require_model_ready()
@@ -433,7 +545,7 @@ async def predict_image(file: UploadFile = File(...), patient_code: str = Form(d
 
 
 @app.post("/gradcam")
-async def gradcam(file: UploadFile = File(...)) -> dict:
+async def gradcam(file: UploadFile = File(...), _: str = Depends(require_doctor_auth)) -> dict:
     image, _, _ = await _read_validated_image(file)
 
     _require_model_ready()

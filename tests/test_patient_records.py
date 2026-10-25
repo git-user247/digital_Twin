@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 from fastapi import HTTPException
 from fastapi.datastructures import UploadFile
 from PIL import Image
+from pydantic import ValidationError
 from starlette.datastructures import Headers
 
 from backend import app as backend_app
@@ -51,7 +52,12 @@ class PatientRecordTests(unittest.IsolatedAsyncioTestCase):
 
     async def _create_patient(self, patient_id: str = "Patient_001") -> dict:
         response = backend_app.create_patient(
-            backend_app.PatientCreate(patient_id=patient_id, notes="Research prototype record")
+            backend_app.PatientCreate(
+                patient_id=patient_id,
+                name="Demo patient",
+                age=64,
+                notes="Research prototype record",
+            )
         )
         return response["patient"]
 
@@ -78,15 +84,114 @@ class PatientRecordTests(unittest.IsolatedAsyncioTestCase):
         retrieved = backend_app.get_patient("Patient_001")
 
         self.assertEqual(created["patient_id"], "Patient_001")
+        self.assertEqual(created["name"], "Demo patient")
+        self.assertEqual(created["age"], 64)
         self.assertEqual(created["notes"], "Research prototype record")
         self.assertEqual(retrieved["patient"], created)
-        self.assertTrue((self.patients_root / "Patient_001" / "profile.json").is_file())
+        profile_path = self.patients_root / "Patient_001" / "profile.json"
+        self.assertTrue(profile_path.is_file())
+        self.assertEqual(json.loads(profile_path.read_text(encoding="utf-8")), created)
+
+    async def test_patient_creation_requires_name_and_age(self) -> None:
+        with self.assertRaises(ValidationError):
+            backend_app.PatientCreate(patient_id="Patient_001")
+        with self.assertRaises(ValidationError):
+            backend_app.PatientCreate(patient_id="Patient_001", name="Demo patient")
+
+    async def test_patient_creation_rejects_invalid_age(self) -> None:
+        for age in (-1, 121, 42.5, True):
+            with self.subTest(age=age):
+                with self.assertRaises(ValidationError):
+                    backend_app.PatientCreate(
+                        patient_id="Patient_001",
+                        name="Demo patient",
+                        age=age,
+                    )
+
+    async def test_legacy_patient_profile_remains_readable(self) -> None:
+        legacy_directory = self.patients_root / "LegacyPatient"
+        legacy_directory.mkdir(parents=True)
+        legacy_profile = {
+            "patient_id": "LegacyPatient",
+            "created_at": "2023-01-01T00:00:00+00:00",
+            "notes": "Existing local record",
+        }
+        (legacy_directory / "profile.json").write_text(
+            json.dumps(legacy_profile),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(backend_app.get_patient("LegacyPatient")["patient"], legacy_profile)
+        listed = backend_app.list_patients()["patients"][0]
+        self.assertEqual(listed["patient_id"], "LegacyPatient")
+        self.assertIsNone(listed["name"])
+
+    async def test_list_patients_returns_profiles_and_latest_scan_summary(self) -> None:
+        created = await self._create_patient("Patient_B")
+        await self._create_patient("Patient_A")
+        older_scan = await self._save_scan(
+            "Patient_B",
+            _png_bytes(),
+            eye_side="right",
+            scan_date="2024-05-12",
+        )
+        latest_scan = await self._save_scan(
+            "Patient_B",
+            _png_bytes((200, 150, 100)),
+            eye_side="left",
+            scan_date="2024-02-03",
+        )
+        for scan, uploaded_at in (
+            (older_scan, "2024-05-13T09:00:00+00:00"),
+            (latest_scan, "2024-05-14T09:00:00+00:00"),
+        ):
+            metadata_path = self.patients_root / "Patient_B" / "scans" / scan["scan_id"] / "metadata.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["uploaded_at"] = uploaded_at
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        result = backend_app.list_patients()
+
+        self.assertEqual([patient["patient_id"] for patient in result["patients"]], ["Patient_A", "Patient_B"])
+        patient_without_scans, patient_with_scan = result["patients"]
+        self.assertEqual(patient_without_scans["scan_count"], 0)
+        self.assertIsNone(patient_without_scans["latest_scan"])
+        self.assertEqual(patient_with_scan["created_at"], created["created_at"])
+        self.assertEqual(patient_with_scan["scan_count"], 2)
+        self.assertEqual(
+            patient_with_scan["latest_scan"],
+            {
+                "scan_id": latest_scan["scan_id"],
+                "uploaded_at": "2024-05-14T09:00:00+00:00",
+                "scan_date": "2024-02-03",
+                "eye_side": "left",
+                "prediction": "AMD",
+                "amd_probability": 0.73,
+                "class_probabilities": {"Non-AMD": 0.27, "AMD": 0.73},
+                "model_version": self.service.model_version,
+            },
+        )
+        self.assertNotIn("image_path", patient_with_scan["latest_scan"])
+        self.assertNotIn("image_url", patient_with_scan["latest_scan"])
+        self.assertNotIn("image", patient_with_scan["latest_scan"])
+
+    async def test_list_patients_handles_missing_and_empty_storage(self) -> None:
+        self.assertEqual(backend_app.list_patients(), {"patients": []})
+
+        self.patients_root.mkdir()
+        self.assertEqual(backend_app.list_patients(), {"patients": []})
 
     async def test_duplicate_patient_id_returns_conflict(self) -> None:
-        await self._create_patient()
+        existing = await self._create_patient()
+        original_profile = (self.patients_root / "Patient_001" / "profile.json").read_text(encoding="utf-8")
         with self.assertRaises(HTTPException) as caught:
             await self._create_patient()
         self.assertEqual(caught.exception.status_code, 409)
+        self.assertEqual(
+            (self.patients_root / "Patient_001" / "profile.json").read_text(encoding="utf-8"),
+            original_profile,
+        )
+        self.assertEqual(backend_app.get_patient("Patient_001")["patient"], existing)
 
     async def test_invalid_patient_ids_are_rejected_without_path_escape(self) -> None:
         for patient_id in ("../outside", "with space", "", "a" * 65):

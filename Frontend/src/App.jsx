@@ -1,33 +1,35 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
+  ArrowLeft,
   ArrowUpRight,
   CalendarDays,
-  Check,
   ChevronRight,
   CircleHelp,
   CloudUpload,
+  Eye,
+  EyeOff,
   FileImage,
   LayoutDashboard,
+  LogOut,
   Menu,
   Microscope,
   ScanLine,
+  Search,
   ShieldCheck,
   Sparkles,
   Upload,
   UserRound,
+  Users,
   X,
 } from 'lucide-react'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/+$/, '')
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 const SELECTED_PATIENT_KEY = 'ocutwin.selectedPatientId'
+const AUTH_TOKEN_KEY = 'ocutwin.doctorAccessToken'
 const navItems = [
-  { label: 'Dashboard', icon: LayoutDashboard },
-  { label: 'Image analysis', icon: ScanLine },
-  { label: 'Digital twin', icon: UserRound },
-  { label: 'Health monitoring', icon: CalendarDays },
-  { label: 'AI insights', icon: Sparkles },
-  { label: 'Project details', icon: Microscope },
+  { label: 'Dashboard', view: 'dashboard', icon: LayoutDashboard },
+  { label: 'Patient directory', view: 'directory', icon: Users },
 ]
 
 async function readResponse(response, fallbackMessage) {
@@ -46,8 +48,33 @@ function formatDate(value) {
 }
 
 function App() {
-  const [activeSection, setActiveSection] = useState('Dashboard')
+  const [currentView, setCurrentView] = useState('access')
+  const [authToken, setAuthToken] = useState(() => {
+    try {
+      return window.localStorage.getItem(AUTH_TOKEN_KEY) || ''
+    } catch {
+      return ''
+    }
+  })
+  const [authChecking, setAuthChecking] = useState(false)
+  const [doctorIdInput, setDoctorIdInput] = useState('')
+  const [passwordInput, setPasswordInput] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [loginBusy, setLoginBusy] = useState(false)
+  const [loginError, setLoginError] = useState('')
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
+  const [patients, setPatients] = useState([])
+  const [patientsBusy, setPatientsBusy] = useState(false)
+  const [patientsError, setPatientsError] = useState('')
+  const [searchTerm, setSearchTerm] = useState('')
+  const [patientForm, setPatientForm] = useState({
+    patient_id: '',
+    name: '',
+    age: '',
+    sex: '',
+    contact: '',
+    notes: '',
+  })
   const [patientId, setPatientId] = useState('')
   const [patient, setPatient] = useState(null)
   const [profileBusy, setProfileBusy] = useState(false)
@@ -62,6 +89,7 @@ function App() {
   const [scanDate, setScanDate] = useState('')
   const [visitNotes, setVisitNotes] = useState('')
   const [savedScan, setSavedScan] = useState(null)
+  const [savedImageUrl, setSavedImageUrl] = useState('')
   const [savedImageError, setSavedImageError] = useState('')
   const [gradcamDataUrl, setGradcamDataUrl] = useState('')
   const [gradcamError, setGradcamError] = useState('')
@@ -70,9 +98,60 @@ function App() {
   const [modelInfo, setModelInfo] = useState(null)
   const [backendStatus, setBackendStatus] = useState('checking')
 
-  const activeNav = useMemo(() => navItems.find((item) => item.label === activeSection), [activeSection])
+  const activeNav = useMemo(
+    () => navItems.find((item) => item.view === currentView),
+    [currentView],
+  )
   const loadedPatientId = patient?.patient_id || ''
   const patientIsLoaded = Boolean(patient && patientId.trim() === loadedPatientId)
+  const filteredPatients = useMemo(() => {
+    const normalizedSearch = searchTerm.trim().toLowerCase()
+    if (!normalizedSearch) return patients
+    return patients.filter((record) => record.patient_id.toLowerCase().includes(normalizedSearch))
+  }, [patients, searchTerm])
+
+  const clearSession = (message = '') => {
+    let storageError = ''
+    try {
+      window.localStorage.removeItem(AUTH_TOKEN_KEY)
+      window.localStorage.removeItem(SELECTED_PATIENT_KEY)
+    } catch {
+      storageError = 'Unable to clear the saved browser session. Close this tab to end the local session.'
+    }
+    setAuthToken('')
+    setAuthChecking(false)
+    setCurrentView('access')
+    setPatients([])
+    setPatient(null)
+    setPatientId('')
+    setScans([])
+    setSelectedFile(null)
+    setPreviewUrl('')
+    setEyeSide('left')
+    setScanDate('')
+    setVisitNotes('')
+    setSavedScan(null)
+    setSavedImageUrl('')
+    setSavedImageError('')
+    setGradcamDataUrl('')
+    setGradcamError('')
+    setError('')
+    setLoginError(message || storageError)
+  }
+
+  const protectedFetch = async (url, options = {}, token = authToken) => {
+    if (!token) {
+      throw new Error('Sign in to the doctor demo before accessing patient records.')
+    }
+    const headers = new Headers(options.headers || {})
+    headers.set('Authorization', `Bearer ${token}`)
+    const response = await fetch(url, { ...options, headers })
+    if (response.status === 401) {
+      clearSession('Your session has expired or is invalid. Please sign in again.')
+      throw new Error('Your session has expired or is invalid. Please sign in again.')
+    }
+    return response
+  }
 
   useEffect(() => {
     let mounted = true
@@ -91,50 +170,83 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!authToken) return undefined
     let mounted = true
-    let storedPatientId
-    try {
-      storedPatientId = window.localStorage.getItem(SELECTED_PATIENT_KEY)?.trim()
-    } catch {
-      setProfileError('This browser could not restore the selected patient from local storage.')
-      return () => { mounted = false }
-    }
+    setAuthChecking(true)
+    fetch(`${API_BASE}/auth/me`, { headers: { Authorization: `Bearer ${authToken}` } })
+      .then(async (response) => {
+        if (response.status === 401) {
+          clearSession('Your saved session has expired. Please sign in again.')
+          return null
+        }
+        return readResponse(response, 'Unable to validate the saved doctor session.')
+      })
+      .then(async (doctor) => {
+        if (!mounted || !doctor) return
+        setCurrentView('dashboard')
+        try {
+          const directoryResponse = await protectedFetch(`${API_BASE}/patients`, {}, authToken)
+          const directory = await readResponse(directoryResponse, 'Unable to load the patient directory.')
+          setPatients(Array.isArray(directory.patients) ? directory.patients : [])
+        } catch (requestError) {
+          if (mounted) setPatientsError(requestError.message || 'Unable to load the patient directory.')
+        }
 
-    if (!storedPatientId) return () => { mounted = false }
-
-    setPatientId(storedPatientId)
-    setProfileBusy(true)
-    fetch(`${API_BASE}/patients/${encodeURIComponent(storedPatientId)}`)
-      .then((response) => readResponse(response, 'Unable to restore the selected patient profile.'))
-      .then(async (payload) => {
-        if (!mounted) return
-        setPatient(payload.patient)
-        setPatientId(payload.patient.patient_id)
-        setProfileMessage('Patient profile restored from local storage.')
-        await loadPatientScans(payload.patient.patient_id)
+        let storedPatientId
+        try {
+          storedPatientId = window.localStorage.getItem(SELECTED_PATIENT_KEY)?.trim()
+        } catch {
+          storedPatientId = ''
+        }
+        if (!storedPatientId) return
+        try {
+          const patientResponse = await protectedFetch(
+            `${API_BASE}/patients/${encodeURIComponent(storedPatientId)}`,
+            {},
+            authToken,
+          )
+          const patientPayload = await readResponse(patientResponse, 'Unable to restore the selected patient profile.')
+          if (!mounted) return
+          setPatient(patientPayload.patient)
+          setPatientId(patientPayload.patient.patient_id)
+          const historyResponse = await protectedFetch(
+            `${API_BASE}/patients/${encodeURIComponent(storedPatientId)}/scans`,
+            {},
+            authToken,
+          )
+          const historyPayload = await readResponse(historyResponse, 'Unable to restore patient scan history.')
+          if (mounted) setScans(Array.isArray(historyPayload.scans) ? historyPayload.scans : [])
+        } catch {
+          try {
+            window.localStorage.removeItem(SELECTED_PATIENT_KEY)
+          } catch {
+            setProfileError('Unable to clear the remembered patient selection.')
+          }
+        }
       })
       .catch((requestError) => {
         if (!mounted) return
-        setPatient(null)
-        setScans([])
-        setProfileError(requestError.message || 'Unable to restore the selected patient profile.')
+        setLoginError(requestError.message || 'Unable to validate the saved doctor session.')
       })
       .finally(() => {
-        if (mounted) setProfileBusy(false)
+        if (mounted) setAuthChecking(false)
       })
-
     return () => { mounted = false }
-  }, [])
+  }, [authToken])
 
   useEffect(() => () => {
     if (previewUrl) URL.revokeObjectURL(previewUrl)
   }, [previewUrl])
 
-  const loadPatientScans = async (id) => {
+  useEffect(() => () => {
+    if (savedImageUrl) URL.revokeObjectURL(savedImageUrl)
+  }, [savedImageUrl])
+
+  const loadPatientScans = async (id, token = authToken) => {
     setHistoryBusy(true)
     setHistoryError('')
     try {
-      const response = await fetch(`${API_BASE}/patients/${encodeURIComponent(id)}/scans`)
+      const response = await protectedFetch(`${API_BASE}/patients/${encodeURIComponent(id)}/scans`, {}, token)
       const payload = await readResponse(response, 'Unable to load this patient’s scan history.')
       setScans(Array.isArray(payload.scans) ? payload.scans : [])
     } catch (requestError) {
@@ -145,12 +257,69 @@ function App() {
     }
   }
 
-  const loadPatient = async () => {
-    const id = patientId.trim()
-    if (!id) {
-      setProfileError('Enter a patient ID before loading a profile.')
-      setProfileMessage('')
+  const loadPatients = async (token = authToken) => {
+    setPatientsBusy(true)
+    setPatientsError('')
+    try {
+      const response = await protectedFetch(`${API_BASE}/patients`, {}, token)
+      const payload = await readResponse(response, 'Unable to load the patient directory.')
+      if (!Array.isArray(payload.patients)) {
+        throw new Error('The backend returned an invalid patient directory response.')
+      }
+      setPatients(payload.patients)
+      return payload.patients
+    } catch (requestError) {
+      setPatients([])
+      setPatientsError(requestError.message || 'Unable to load the patient directory.')
+      return null
+    } finally {
+      setPatientsBusy(false)
+    }
+  }
+
+  const login = async (event) => {
+    event.preventDefault()
+    const doctorId = doctorIdInput.trim()
+    if (!doctorId || !passwordInput) {
+      setLoginError('Enter your doctor ID or email and password.')
       return
+    }
+    setLoginBusy(true)
+    setLoginError('')
+    try {
+      const response = await fetch(`${API_BASE}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ doctor_id: doctorId, password: passwordInput }),
+      })
+      const payload = await readResponse(response, 'Unable to sign in.')
+      if (!payload.access_token || payload.token_type?.toLowerCase() !== 'bearer') {
+        throw new Error('The backend returned an invalid login response.')
+      }
+      try {
+        window.localStorage.setItem(AUTH_TOKEN_KEY, payload.access_token)
+      } catch {
+        throw new Error('This browser could not store the login session. Enable local storage and try again.')
+      }
+      setAuthToken(payload.access_token)
+      setPasswordInput('')
+      setShowPassword(false)
+    } catch (requestError) {
+      setLoginError(requestError.message || 'Unable to sign in. Check your credentials and backend connection.')
+    } finally {
+      setLoginBusy(false)
+    }
+  }
+
+  const openPatient = async (id) => {
+    const normalizedId = id.trim()
+    if (!normalizedId) return
+    if (normalizedId !== loadedPatientId) {
+      setSelectedFile(null)
+      setPreviewUrl('')
+      setEyeSide('left')
+      setScanDate('')
+      setVisitNotes('')
     }
     setProfileBusy(true)
     setProfileError('')
@@ -158,21 +327,23 @@ function App() {
     setPatient(null)
     setScans([])
     setSavedScan(null)
+    setSavedImageUrl('')
+    setSavedImageError('')
+    setGradcamDataUrl('')
+    setGradcamError('')
+    setError('')
     try {
-      const response = await fetch(`${API_BASE}/patients/${encodeURIComponent(id)}`)
+      const response = await protectedFetch(`${API_BASE}/patients/${encodeURIComponent(normalizedId)}`)
       const payload = await readResponse(response, 'Unable to load the patient profile.')
       setPatient(payload.patient)
       setPatientId(payload.patient.patient_id)
-      let remembered = true
       try {
         window.localStorage.setItem(SELECTED_PATIENT_KEY, payload.patient.patient_id)
       } catch {
-        remembered = false
+        setProfileMessage('Patient loaded, but this browser could not remember it after refresh.')
       }
-      setProfileMessage(remembered
-        ? 'Patient profile loaded and will be restored after refresh.'
-        : 'Patient profile loaded, but this browser could not remember it for refresh.')
       await loadPatientScans(payload.patient.patient_id)
+      setCurrentView('workspace')
     } catch (requestError) {
       setProfileError(requestError.message || 'Unable to load the patient profile.')
     } finally {
@@ -180,54 +351,57 @@ function App() {
     }
   }
 
-  const createPatient = async () => {
-    const id = patientId.trim()
-    if (!id) {
-      setProfileError('Enter a unique patient ID before creating a profile.')
-      setProfileMessage('')
+  const createPatient = async (event) => {
+    event.preventDefault()
+    const form = {
+      ...patientForm,
+      patient_id: patientForm.patient_id.trim(),
+      name: patientForm.name.trim(),
+      contact: patientForm.contact.trim(),
+      notes: patientForm.notes.trim(),
+      age: Number(patientForm.age),
+    }
+    if (!form.patient_id || !form.name || !patientForm.age.trim()) {
+      setProfileError('Patient ID, name or demo alias, and age are required.')
+      return
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(form.patient_id)) {
+      setProfileError('Patient ID must be 1–64 characters using letters, numbers, hyphens, or underscores.')
+      return
+    }
+    if (!Number.isInteger(form.age) || form.age < 0 || form.age > 120) {
+      setProfileError('Enter an age as a whole number from 0 to 120.')
       return
     }
     setProfileBusy(true)
     setProfileError('')
     setProfileMessage('')
     try {
-      const response = await fetch(`${API_BASE}/patients`, {
+      const response = await protectedFetch(`${API_BASE}/patients`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ patient_id: id }),
+        body: JSON.stringify({
+          ...form,
+          sex: form.sex || null,
+          contact: form.contact || null,
+          notes: form.notes || null,
+        }),
       })
       const payload = await readResponse(response, 'Unable to create the patient profile.')
-      setPatient(payload.patient)
-      setPatientId(payload.patient.patient_id)
-      setScans([])
-      setSavedScan(null)
-      let remembered = true
-      try {
-        window.localStorage.setItem(SELECTED_PATIENT_KEY, payload.patient.patient_id)
-      } catch {
-        remembered = false
-      }
-      setProfileMessage(remembered
-        ? 'Patient profile created and will be restored after refresh.'
-        : 'Patient profile created, but this browser could not remember it for refresh.')
+      setPatientForm({ patient_id: '', name: '', age: '', sex: '', contact: '', notes: '' })
+      await loadPatients()
+      await openPatient(payload.patient.patient_id)
+      setProfileMessage('Patient profile created and opened.')
     } catch (requestError) {
-      setPatient(null)
       setProfileError(requestError.message || 'Unable to create the patient profile.')
-    } finally {
       setProfileBusy(false)
     }
+
   }
 
-  const handlePatientIdChange = (event) => {
-    const nextId = event.target.value
-    setPatientId(nextId)
-    if (nextId.trim() !== loadedPatientId) {
-      setPatient(null)
-      setScans([])
-      setSavedScan(null)
-      setProfileMessage('')
-      setHistoryError('')
-    }
+  const generatePatientId = () => {
+    const generated = `Demo_${window.crypto.randomUUID().replaceAll('-', '')}`
+    setPatientForm((current) => ({ ...current, patient_id: generated }))
     setProfileError('')
   }
 
@@ -245,6 +419,7 @@ function App() {
     setSelectedFile(file)
     setPreviewUrl(URL.createObjectURL(file))
     setSavedScan(null)
+    setSavedImageUrl('')
     setGradcamDataUrl('')
     setGradcamError('')
   }
@@ -255,12 +430,8 @@ function App() {
   }
 
   const analyzeAndSaveScan = async () => {
-    if (!patientId.trim()) {
-      setError('Enter a patient ID and load or create the profile before saving a scan.')
-      return
-    }
     if (!patientIsLoaded) {
-      setError('Load or create this patient profile before saving a scan.')
+      setError('Open a patient workspace before saving a scan.')
       return
     }
     if (!selectedFile) {
@@ -282,7 +453,7 @@ function App() {
     if (visitNotes.trim()) formData.append('notes', visitNotes.trim())
 
     try {
-      const response = await fetch(`${API_BASE}/patients/${encodeURIComponent(patientId.trim())}/scans`, {
+      const response = await protectedFetch(`${API_BASE}/patients/${encodeURIComponent(patientId.trim())}/scans`, {
         method: 'POST',
         body: formData,
       })
@@ -291,12 +462,14 @@ function App() {
         throw new Error('The backend returned an incomplete saved-scan response.')
       }
       setSavedScan(payload.scan)
+      await loadSavedImage(payload.scan)
       await loadPatientScans(patientId.trim())
+      await loadPatients()
 
       const explanationForm = new FormData()
       explanationForm.append('file', selectedFile)
       try {
-        const explanationResponse = await fetch(`${API_BASE}/gradcam`, {
+        const explanationResponse = await protectedFetch(`${API_BASE}/gradcam`, {
           method: 'POST',
           body: explanationForm,
         })
@@ -320,47 +493,122 @@ function App() {
     setSelectedFile(null)
     setPreviewUrl('')
     setSavedScan(null)
+    setSavedImageUrl('')
     setGradcamDataUrl('')
     setGradcamError('')
     setError('')
   }
 
-  const selectSavedScan = (scan) => {
+  const loadSavedImage = async (scan, token = authToken) => {
+    setSavedImageUrl('')
+    setSavedImageError('')
+    try {
+      const response = await protectedFetch(`${API_BASE}${scan.image_url}`, {}, token)
+      const imageUrl = URL.createObjectURL(await response.blob())
+      setSavedImageUrl(imageUrl)
+    } catch (requestError) {
+      setSavedImageError(requestError.message || 'Unable to retrieve this saved image from the backend.')
+    }
+  }
+
+  const selectSavedScan = async (scan) => {
     setSavedScan(scan)
     setSavedImageError('')
+    setSavedImageUrl('')
     setGradcamDataUrl('')
     setGradcamError('')
+    await loadSavedImage(scan)
   }
 
-  const scrollTo = (label) => {
-    setActiveSection(label)
+  const logout = () => {
+    clearSession('')
+    setPasswordInput('')
+    setDoctorIdInput('')
+    setShowPassword(false)
+  }
+
+  const returnToDirectory = () => {
+    setCurrentView('directory')
     setIsSidebarOpen(false)
-    const id = label.toLowerCase().replaceAll(' ', '-')
-    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    setProfileError('')
+    setError('')
   }
 
-  const latestScan = scans.length ? scans[scans.length - 1] : null
+  if (currentView === 'access') {
+    return (
+      <main className="demo-access-shell">
+        <section className="demo-access-card">
+          <div className="brand-mark"><EyeMark /></div>
+          <p className="eyebrow">OcuTwin · Academic prototype</p>
+          <h1>Doctor sign in</h1>
+          <p className="demo-access-copy">Sign in to the local research prototype to review registered demo patients and their saved OCT observations.</p>
+          <div className="demo-access-notice">
+            <CircleHelp size={18} />
+            <span>Local research/demo authentication only. This prototype is not a production clinical system; do not use identifiable clinical data.</span>
+          </div>
+          {authChecking ? <p className="empty-state">Checking saved doctor session…</p> : (
+            <form className="login-form" onSubmit={login}>
+              <label htmlFor="doctor-id">Doctor ID or email</label>
+              <input
+                id="doctor-id"
+                type="text"
+                autoComplete="username"
+                value={doctorIdInput}
+                onChange={(event) => setDoctorIdInput(event.target.value)}
+                maxLength={254}
+                required
+              />
+              <label htmlFor="doctor-password">Password</label>
+              <div className="password-input-wrap">
+                <input
+                  id="doctor-password"
+                  type={showPassword ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  value={passwordInput}
+                  onChange={(event) => setPasswordInput(event.target.value)}
+                  maxLength={1024}
+                  required
+                />
+                <button type="button" className="password-visibility" onClick={() => setShowPassword((visible) => !visible)} aria-label={showPassword ? 'Hide password' : 'Show password'}>
+                  {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+                </button>
+              </div>
+              {loginError && <div className="error-box" role="alert">{loginError}</div>}
+              <button type="submit" className="primary-action demo-access-button" disabled={loginBusy}>
+                {loginBusy ? 'Signing in…' : 'Login'}<ChevronRight size={17} />
+              </button>
+            </form>
+          )}
+          <BackendStatus status={backendStatus} />
+        </section>
+      </main>
+    )
+  }
 
   return (
     <div className="app-shell">
       <aside className={`sidebar ${isSidebarOpen ? 'sidebar-open' : ''}`}>
         <div className="brand-lockup">
           <div className="brand-mark"><EyeMark /></div>
-          <div><p className="brand-name">OcuTwin</p><p className="brand-caption">Eye health intelligence</p></div>
+          <div><p className="brand-name">OcuTwin</p><p className="brand-caption">Doctor demo workspace</p></div>
           <button className="mobile-close" onClick={() => setIsSidebarOpen(false)} aria-label="Close navigation"><X size={18} /></button>
         </div>
         <div className="sidebar-label">Workspace</div>
         <nav className="nav-list" aria-label="Primary navigation">
-          {navItems.map(({ label, icon: Icon }) => (
-            <button key={label} className={`nav-item ${activeSection === label ? 'nav-item-active' : ''}`} onClick={() => scrollTo(label)}>
+          {navItems.map(({ label, view, icon: Icon }) => (
+            <button key={view} className={`nav-item ${currentView === view ? 'nav-item-active' : ''}`} onClick={() => { setCurrentView(view); setIsSidebarOpen(false) }}>
               <Icon size={17} strokeWidth={1.8} /><span>{label}</span>
-              {activeSection === label && <ChevronRight className="nav-chevron" size={15} />}
+              {currentView === view && <ChevronRight className="nav-chevron" size={15} />}
             </button>
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <div className="sidebar-help"><CircleHelp size={17} /><div><strong>Local research prototype</strong><span>No authentication or authorization</span></div></div>
-          <div className="profile-row"><div className="avatar">RT</div><div><strong>Research tool</strong><span>Not for identifiable clinical data</span></div></div>
+          <div className="sidebar-help"><CircleHelp size={17} /><div><strong>Local research prototype</strong><span>Demo authentication only</span></div></div>
+          <div className="profile-row">
+            <div className="avatar"><UserRound size={15} /></div>
+            <div><strong>Demo workspace</strong><span>{patientIsLoaded ? patient.patient_id : 'Local access'}</span></div>
+            <button type="button" aria-label="Logout" title="Logout" onClick={logout}><LogOut size={15} /></button>
+          </div>
         </div>
       </aside>
 
@@ -369,166 +617,440 @@ function App() {
       <main className="main-content">
         <header className="topbar">
           <button className="mobile-menu" onClick={() => setIsSidebarOpen(true)} aria-label="Open navigation"><Menu size={21} /></button>
-          <div className="breadcrumb"><span>Workspace</span><ChevronRight size={14} /><strong>{activeNav?.label || 'Dashboard'}</strong></div>
-          <div className="topbar-actions">
-            <span className="live-dot"><i /> {backendStatus === 'ready' ? 'Model ready' : backendStatus === 'model-unavailable' ? 'Model unavailable' : backendStatus === 'offline' ? 'Backend unavailable' : 'Checking backend'}</span>
-          </div>
+          <div className="breadcrumb"><span>Doctor workspace</span><ChevronRight size={14} /><strong>{currentView === 'workspace' ? patient?.patient_id || 'Patient workspace' : activeNav?.label || 'Dashboard'}</strong></div>
+          <div className="topbar-actions"><BackendStatus status={backendStatus} /></div>
         </header>
 
-        <div className="page-wrap">
-          <section id="dashboard" className="hero-section section-anchor">
-            <div>
-              <p className="eyebrow"><span className="eyebrow-line" /> Patient-specific OCT observations</p>
-              <h1>See the signal<br /><em>behind the scan.</em></h1>
-              <p className="hero-copy">Save model-backed OCT observations to a local patient record. Scan history shows recorded visits only; no progression score or clinical risk estimate is generated.</p>
-            </div>
-            <div className="hero-meta">
-              <div className="hero-status"><span className="status-check"><Check size={13} /></span><span><b>{patientIsLoaded ? 'Profile loaded' : 'No profile selected'}</b><small>{loadedPatientId || 'Load or create a patient profile'}</small></span></div>
-              <div className="hero-id">LOCAL / RESEARCH<span>Model: {modelInfo?.model?.architecture || 'status unavailable'}</span></div>
-            </div>
-          </section>
+        <div className="page-wrap doctor-page-wrap">
+          {currentView === 'dashboard' && (
+            <DoctorDashboard
+              patients={patients}
+              isLoading={patientsBusy}
+              error={patientsError}
+              modelInfo={modelInfo}
+              onRetry={loadPatients}
+              onOpenDirectory={() => setCurrentView('directory')}
+              onOpenPatient={openPatient}
+            />
+          )}
 
-          <section className="overview-grid" aria-label="Selected patient record summary">
-            <SummaryCard label="Patient profile" value={patientIsLoaded ? loadedPatientId : 'None loaded'} note={patientIsLoaded ? 'Backend profile confirmed' : 'No patient selected'} icon={<UserRound size={19} />} />
-            <SummaryCard label="Saved visits" value={patientIsLoaded ? String(scans.length) : '—'} note={historyBusy ? 'Loading history…' : patientIsLoaded ? 'Stored scan records' : 'Load a profile to view'} icon={<CalendarDays size={19} />} />
-            <SummaryCard label="Latest saved result" value={latestScan?.prediction || '—'} note={latestScan ? `AMD probability ${formatProbability(latestScan.amd_probability)}` : 'No scan result available'} icon={<ScanLine size={19} />} />
-            <SummaryCard label="Latest upload" value={latestScan ? formatDate(latestScan.uploaded_at) : '—'} note={latestScan?.scan_date ? `Scan date ${latestScan.scan_date}` : 'No saved scan date'} icon={<FileImage size={19} />} />
-          </section>
+          {currentView === 'directory' && (
+            <PatientDirectory
+              patients={filteredPatients}
+              totalPatients={patients.length}
+              isLoading={patientsBusy}
+              error={patientsError}
+              searchTerm={searchTerm}
+              onSearchChange={setSearchTerm}
+              patientForm={patientForm}
+              onPatientFormChange={(field, value) => setPatientForm((current) => ({ ...current, [field]: value }))}
+              onGeneratePatientId={generatePatientId}
+              profileBusy={profileBusy}
+              profileError={profileError}
+              onRetry={loadPatients}
+              onCreatePatient={createPatient}
+              onOpenPatient={openPatient}
+            />
+          )}
 
-          <section id="image-analysis" className="content-grid section-anchor">
-            <div className="panel upload-panel">
-              <PanelHeader eyebrow="OCT imaging" title="Analyze and save scan" action="Persistent visit" />
-              <div className="visit-fields">
-                <label>Eye side
-                  <select value={eyeSide} onChange={(event) => setEyeSide(event.target.value)}>
-                    <option value="left">Left</option>
-                    <option value="right">Right</option>
-                  </select>
-                </label>
-                <label>Scan date <span className="optional-label">(optional)</span>
-                  <input type="date" value={scanDate} onChange={(event) => setScanDate(event.target.value)} />
-                </label>
-                <label className="visit-notes-field">Visit notes <span className="optional-label">(optional)</span>
-                  <textarea maxLength={2000} rows={2} value={visitNotes} onChange={(event) => setVisitNotes(event.target.value)} placeholder="Non-identifying notes for this scan" />
-                </label>
-              </div>
-
-              <div className="upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
-                {previewUrl ? (
-                  <div className="image-preview-wrap"><img src={previewUrl} alt="Selected OCT scan preview" /><button className="remove-image" onClick={clearImage} aria-label="Remove image"><X size={14} /></button></div>
-                ) : (
-                  <>
-                    <div className="upload-icon"><CloudUpload size={22} /></div>
-                    <strong>Drop an OCT image here</strong><span>or browse from your device</span>
-                    <label className="browse-button"><Upload size={15} /> Choose image<input type="file" accept="image/jpeg,image/png" onChange={(event) => handleFile(event.target.files?.[0])} /></label>
-                    <small>JPEG or PNG · up to 20 MB</small>
-                  </>
-                )}
-              </div>
-
-              {previewUrl && (
-                <div className="selected-file">
-                  <div><FileImage size={16} /><div><b>{selectedFile?.name}</b><span>{patientIsLoaded ? 'Ready to analyze and persist' : 'Load or create a patient profile first'}</span></div></div>
-                  <button onClick={analyzeAndSaveScan} className="analyze-button" disabled={isAnalyzing || !patientIsLoaded}>
-                    {isAnalyzing ? 'Analyzing and saving…' : 'Analyze / Save'}<ArrowUpRight size={16} />
-                  </button>
-                </div>
-              )}
-              {error && <div className="error-box" role="alert">{error}</div>}
-              {savedScan && <SavedScanSummary scan={savedScan} />}
-              {gradcamError && <div className="info-box">{gradcamError}</div>}
-              {gradcamDataUrl && <div className="gradcam-panel"><img src={gradcamDataUrl} alt="Grad-CAM visualization for the saved scan" /><div className="gradcam-caption">Grad-CAM is an explanation aid only; it does not establish disease location.</div></div>}
-            </div>
-
-            <div className="panel twin-panel" id="digital-twin">
-              <PanelHeader eyebrow="Persistent patient record" title="Patient profile" action="Local prototype" />
-              <div className="patient-form patient-profile-form">
-                <label htmlFor="patient-id">Patient ID</label>
-                <input id="patient-id" type="text" value={patientId} onChange={handlePatientIdChange} maxLength={64} placeholder="Enter a unique ID" />
-                <div className="profile-actions">
-                  <button type="button" onClick={loadPatient} disabled={profileBusy}>{profileBusy ? 'Loading…' : 'Load profile'}</button>
-                  <button type="button" onClick={createPatient} disabled={profileBusy}>{profileBusy ? 'Please wait…' : 'Create profile'}</button>
-                </div>
-              </div>
-              {profileError && <div className="error-box" role="alert">{profileError}</div>}
-              {profileMessage && <div className="success-box" role="status">{profileMessage}</div>}
-              <div className="patient-profile-summary">
-                <span className="profile-icon"><UserRound size={20} /></span>
-                <div><small>Loaded backend profile</small><strong>{patientIsLoaded ? patient.patient_id : 'No patient profile loaded'}</strong><span>{patientIsLoaded ? `Created ${formatDate(patient.created_at)}` : 'Create a new profile or load an existing ID.'}</span></div>
-              </div>
-              <p className="prototype-warning">Do not enter identifiable clinical information. This local prototype has no authentication or authorization.</p>
-            </div>
-          </section>
-
-          <section id="health-monitoring" className="content-grid section-anchor">
-            <div className="panel history-panel">
-              <PanelHeader eyebrow="Backend scan records" title="Saved scan history" action={patientIsLoaded ? `${scans.length} visits` : 'No patient'} />
-              {!patientIsLoaded ? <p className="empty-state">Load or create a patient profile to view its saved scans.</p>
-                : historyBusy ? <p className="empty-state">Loading saved scan history…</p>
-                  : historyError ? <div className="error-box" role="alert">{historyError}</div>
-                    : scans.length === 0 ? <p className="empty-state">No saved scans for this patient yet.</p>
-                      : <div className="scan-history-list">
-                        {scans.map((scan) => (
-                          <article className={`scan-history-item ${savedScan?.scan_id === scan.scan_id ? 'scan-history-item-active' : ''}`} key={scan.scan_id}>
-                            <div className="scan-history-summary">
-                              <div><strong>{scan.prediction} <span>· {scan.eye_side} eye</span></strong><small>Scan date: {formatDate(scan.scan_date)} · Uploaded: {formatDate(scan.uploaded_at)}</small><small>AMD probability: {formatProbability(scan.amd_probability)}</small></div>
-                              <button type="button" onClick={() => selectSavedScan(scan)} disabled={!scan.image_available}>{scan.image_available ? 'View scan' : 'Image unavailable'}</button>
-                            </div>
-                          </article>
-                        ))}
-                      </div>}
-              {savedScan && (
-                <div className="saved-scan-view">
-                  <h3>Saved OCT image</h3>
-                  {savedScan.image_available === false || savedImageError ? <p className="empty-state">{savedImageError || 'The backend reports that this scan image is unavailable.'}</p>
-                    : <img src={`${API_BASE}${savedScan.image_url}`} alt={`Saved OCT scan ${savedScan.scan_id}`} onError={() => setSavedImageError('Unable to retrieve this saved image from the backend.')} />}
-                  <small>Scan ID: {savedScan.scan_id}</small>
-                </div>
-              )}
-            </div>
-
-            <div className="panel observation-panel">
-              <PanelHeader eyebrow="Interpretation limits" title="What this system records" />
-              <div className="observation-quote">Each saved visit is a single-image AMD classification—not a clinical risk score or a progression estimate.</div>
-              <div className="observation-source"><div className="source-icon"><ShieldCheck size={18} /></div><div><b>Actual model outputs only</b><span>Probability values come from the saved classifier response.</span></div></div>
-              <div className="observation-divider" />
-              <div className="next-review"><div className="calendar-tile"><CalendarDays size={18} /></div><div><span>Longitudinal interpretation</span><strong>No visit-to-visit comparison is implemented</strong></div></div>
-            </div>
-          </section>
-
-          <section id="ai-insights" className="section-anchor insights-section">
-            <div className="section-heading"><div><p className="eyebrow"><span className="eyebrow-line" /> Current saved visit</p><h2>Model output</h2></div><span className="section-note"><Sparkles size={15} /> No clinical risk estimate</span></div>
-            {savedScan ? <div className="model-output-grid">
-              <SummaryCard label="Prediction" value={savedScan.prediction} note={`Eye: ${savedScan.eye_side}`} icon={<ScanLine size={19} />} />
-              <SummaryCard label="AMD probability" value={formatProbability(savedScan.amd_probability)} note="Classifier probability; not calibrated clinical risk" icon={<Sparkles size={19} />} />
-              <SummaryCard label="Non-AMD probability" value={formatProbability(savedScan.class_probabilities?.['Non-AMD'])} note="Returned by the model endpoint" icon={<ShieldCheck size={19} />} />
-              <SummaryCard label="Model version" value={savedScan.model_version || 'Not reported'} note={`Scan ID ${savedScan.scan_id}`} icon={<Microscope size={19} />} />
-            </div> : <p className="empty-state">No current saved scan result. Analyze and save a scan to display the model’s response.</p>}
-          </section>
-
-          <section id="project-details" className="project-section section-anchor">
-            <div className="project-intro">
-              <p className="eyebrow"><span className="eyebrow-line" /> System context</p>
-              <h2>Research prototype<br /><em>with explicit limits.</em></h2>
-              <p>This local application connects persistent patient records to the existing binary OCT classifier. It has no user authentication and is not for clinical use or identifiable patient data.</p>
-              <div className="project-status"><span className="status-pulse" /> {backendStatus === 'ready' ? 'Backend reports model ready' : backendStatus === 'model-unavailable' ? 'Backend is running, but model inference is unavailable' : backendStatus === 'offline' ? 'Backend unavailable' : 'Checking backend'}</div>
-            </div>
-            <div className="panel status-panel">
-              <div className="status-panel-head"><div><span className="eyebrow-small">Model information</span><h3>{modelInfo?.model?.architecture || 'Model information unavailable'}</h3></div><span className="status-tag"><i /> {modelInfo?.ready ? 'Ready' : 'Unavailable'}</span></div>
-              <div className="status-list">
-                <div><span>Task</span><strong>{modelInfo?.model?.task || 'Not available'}</strong></div>
-                <div><span>Input size</span><strong>{modelInfo?.model?.input_image_size?.join(' × ') || 'Not available'}</strong></div>
-                <div><span>Classes</span><strong>{modelInfo?.model?.classes?.join(' / ') || 'Not available'}</strong></div>
-                <div><span>Checkpoint</span><strong>{modelInfo?.checkpoint_exists ? 'Found' : 'Not confirmed'}</strong></div>
-              </div>
-              {modelInfo?.error && <div className="error-box" role="status">{modelInfo.error}</div>}
-              <div className="quality-bar"><div><span>Clinical risk score</span><b>Not provided</b></div><p>Saved probabilities are classifier outputs and should not be interpreted as calibrated clinical risk.</p></div>
-            </div>
-          </section>
-          <footer className="footer"><span>OcuTwin / AI-enabled eye health monitoring</span><span>Local academic prototype · no authentication</span></footer>
+          {currentView === 'workspace' && (
+            <PatientWorkspace
+              patient={patient}
+              patientIsLoaded={patientIsLoaded}
+              scans={scans}
+              profileBusy={profileBusy}
+              profileMessage={profileMessage}
+              profileError={profileError}
+              historyBusy={historyBusy}
+              historyError={historyError}
+              selectedFile={selectedFile}
+              previewUrl={previewUrl}
+              eyeSide={eyeSide}
+              scanDate={scanDate}
+              visitNotes={visitNotes}
+              savedScan={savedScan}
+              savedImageError={savedImageError}
+              gradcamDataUrl={gradcamDataUrl}
+              gradcamError={gradcamError}
+              isAnalyzing={isAnalyzing}
+              error={error}
+              onBack={returnToDirectory}
+              onEyeSideChange={setEyeSide}
+              onScanDateChange={setScanDate}
+              onVisitNotesChange={setVisitNotes}
+              onDrop={handleDrop}
+              onFileChange={(event) => handleFile(event.target.files?.[0])}
+              onClearImage={clearImage}
+              onAnalyze={analyzeAndSaveScan}
+              onSelectSavedScan={selectSavedScan}
+              savedImageUrl={savedImageUrl}
+              onSavedImageError={() => setSavedImageError('Unable to retrieve this saved image from the backend.')}
+            />
+          )}
         </div>
       </main>
     </div>
+  )
+}
+
+function DoctorDashboard({ patients, isLoading, error, modelInfo, onRetry, onOpenDirectory, onOpenPatient }) {
+  const totalScans = patients.reduce((total, patient) => total + patient.scan_count, 0)
+  const recentActivity = patients
+    .filter((patient) => patient.latest_scan)
+    .sort((first, second) => new Date(second.latest_scan.uploaded_at) - new Date(first.latest_scan.uploaded_at))
+    .slice(0, 5)
+
+  return (
+    <>
+      <section className="doctor-page-heading">
+        <div>
+          <p className="eyebrow">Clinical workflow demonstration</p>
+          <h1>Doctor dashboard</h1>
+          <p className="hero-copy">Review registered local demo patients and their latest saved OCT activity. This prototype does not provide clinical risk or progression estimates.</p>
+        </div>
+        <button type="button" className="primary-action" onClick={onOpenDirectory}><Users size={17} /> Open patient directory</button>
+      </section>
+
+      <section className="overview-grid doctor-overview-grid" aria-label="Live local record summary">
+        <SummaryCard label="Registered patients" value={isLoading ? '…' : error ? '—' : String(patients.length)} note="Read from local patient storage" icon={<Users size={19} />} />
+        <SummaryCard label="Saved OCT scans" value={isLoading ? '…' : error ? '—' : String(totalScans)} note="Stored scan records" icon={<ScanLine size={19} />} />
+        <SummaryCard label="Model status" value={modelInfo?.ready ? 'Ready' : 'Unavailable'} note={modelInfo?.model?.architecture || 'Backend status'} icon={<Microscope size={19} />} />
+      </section>
+
+      {error && <div className="error-box directory-error" role="alert">{error}<button type="button" onClick={onRetry}>Retry</button></div>}
+      {isLoading && <p className="empty-state">Loading patient and recent activity from the backend…</p>}
+      {!isLoading && !error && patients.length === 0 && (
+        <div className="panel directory-empty-panel">
+          <h2>No registered patients yet</h2>
+          <p className="empty-state">Create a patient profile in the directory to begin a local demonstration.</p>
+          <button type="button" className="primary-action" onClick={onOpenDirectory}>Go to patient directory</button>
+        </div>
+      )}
+
+      {!isLoading && !error && patients.length > 0 && (
+        <section className="panel recent-activity-panel">
+          <div className="panel-header">
+            <div><span className="eyebrow-small">From saved scan records</span><h2>Recent activity</h2></div>
+            <button type="button" className="text-action" onClick={onOpenDirectory}>View all patients<ChevronRight size={15} /></button>
+          </div>
+          {recentActivity.length === 0 ? <p className="empty-state">No saved scan activity is available yet.</p> : (
+            <div className="recent-activity-list">
+              {recentActivity.map(({ patient_id: id, latest_scan: scan }) => (
+                <button type="button" className="recent-activity-item" key={id} onClick={() => onOpenPatient(id)}>
+                  <span className="activity-icon"><ScanLine size={17} /></span>
+                  <span className="activity-copy">
+                    <strong>{id} <i>· {scan.eye_side} eye · {scan.prediction}</i></strong>
+                    <small>Uploaded {formatDate(scan.uploaded_at)}{scan.scan_date ? ` · Scan date ${formatDate(scan.scan_date)}` : ' · Scan date not provided'}</small>
+                  </span>
+                  <ChevronRight size={16} />
+                </button>
+              ))}
+            </div>
+          )}
+          <p className="data-caveat">Recent activity uses saved upload timestamps; an upload time is not a scan acquisition date.</p>
+        </section>
+      )}
+    </>
+  )
+}
+
+function PatientDirectory({
+  patients,
+  totalPatients,
+  isLoading,
+  error,
+  searchTerm,
+  onSearchChange,
+  patientForm,
+  onPatientFormChange,
+  onGeneratePatientId,
+  profileBusy,
+  profileError,
+  onRetry,
+  onCreatePatient,
+  onOpenPatient,
+}) {
+  return (
+    <>
+      <section className="doctor-page-heading">
+        <div><p className="eyebrow">Local patient records</p><h1>Patient directory</h1><p className="hero-copy">Search real profiles stored by the local backend or create a de-identified demo profile.</p></div>
+      </section>
+      <section className="panel registration-panel">
+        <div className="panel-header">
+          <div><span className="eyebrow-small">New local profile</span><h2>Register a patient</h2></div>
+          <span className="panel-action">Use a demo alias; avoid real personal data</span>
+        </div>
+        <form className="patient-registration-form" onSubmit={onCreatePatient}>
+          <div className="registration-grid">
+            <label>Patient ID <span className="required-label">Required</span>
+              <div className="patient-id-entry">
+                <input
+                  value={patientForm.patient_id}
+                  onChange={(event) => onPatientFormChange('patient_id', event.target.value)}
+                  maxLength={64}
+                  pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
+                  placeholder="e.g. Demo_001"
+                  required
+                  aria-label="Patient ID"
+                />
+                <button type="button" className="secondary-action" onClick={onGeneratePatientId}>Generate ID</button>
+              </div>
+            </label>
+            <label>Patient name or demo alias <span className="required-label">Required</span>
+              <input
+                value={patientForm.name}
+                onChange={(event) => onPatientFormChange('name', event.target.value)}
+                maxLength={120}
+                autoComplete="off"
+                placeholder="e.g. Demo participant A"
+                required
+              />
+            </label>
+            <label>Age <span className="required-label">Required</span>
+              <input
+                type="number"
+                value={patientForm.age}
+                onChange={(event) => onPatientFormChange('age', event.target.value)}
+                min="0"
+                max="120"
+                step="1"
+                placeholder="0–120"
+                required
+              />
+            </label>
+            <label>Sex <span className="optional-label">(optional)</span>
+              <select value={patientForm.sex} onChange={(event) => onPatientFormChange('sex', event.target.value)}>
+                <option value="">Not provided</option>
+                <option value="female">Female</option>
+                <option value="male">Male</option>
+                <option value="intersex">Intersex</option>
+                <option value="another">Another identity</option>
+                <option value="prefer_not_to_say">Prefer not to say</option>
+              </select>
+            </label>
+            <label>Contact or reference details <span className="optional-label">(optional; demo-safe only)</span>
+              <input
+                value={patientForm.contact}
+                onChange={(event) => onPatientFormChange('contact', event.target.value)}
+                maxLength={200}
+                autoComplete="off"
+                placeholder="Non-identifying reference"
+              />
+            </label>
+            <label className="registration-notes">Relevant medical notes <span className="optional-label">(optional; avoid identifiable details)</span>
+              <textarea
+                value={patientForm.notes}
+                onChange={(event) => onPatientFormChange('notes', event.target.value)}
+                maxLength={2000}
+                rows={3}
+                placeholder="Enter only relevant, non-identifying demo notes"
+              />
+            </label>
+          </div>
+          <button type="submit" className="primary-action" disabled={profileBusy}>
+            {profileBusy ? 'Saving profile…' : 'Save and open patient'}<ChevronRight size={16} />
+          </button>
+        </form>
+      </section>
+      <section className="directory-toolbar">
+        <label className="directory-search">
+          <Search size={18} />
+          <input type="search" value={searchTerm} onChange={(event) => onSearchChange(event.target.value)} placeholder="Search by patient ID" aria-label="Search patients by ID" />
+        </label>
+      </section>
+      {profileError && <div className="error-box directory-error" role="alert">{profileError}</div>}
+      {isLoading && <p className="empty-state">Loading the patient directory…</p>}
+      {error && <div className="error-box directory-error" role="alert">{error}<button type="button" onClick={onRetry}>Retry</button></div>}
+      {!isLoading && !error && totalPatients === 0 && (
+        <div className="panel directory-empty-panel">
+          <h2>No registered patients yet</h2>
+          <p className="empty-state">Use the registration form above to create the first local demo record.</p>
+        </div>
+      )}
+      {!isLoading && !error && totalPatients > 0 && patients.length === 0 && <p className="empty-state">No patients match “{searchTerm}”.</p>}
+      {!isLoading && !error && patients.length > 0 && (
+        <section className="patient-directory-grid" aria-label={`Patient records, ${patients.length} shown`}>
+          {patients.map((patient) => (
+            <article className="patient-directory-card" key={patient.patient_id}>
+              <div className="directory-card-top">
+                <span className="directory-patient-icon"><UserRound size={19} /></span>
+                <span className="visit-count">{patient.scan_count} {patient.scan_count === 1 ? 'scan' : 'scans'}</span>
+              </div>
+              <h2>{patient.name || patient.patient_id}</h2>
+              {patient.name && <p className="directory-patient-id">Patient ID: {patient.patient_id}</p>}
+              <p>{patient.age != null ? `Age ${patient.age}` : 'Age not provided'}{patient.sex ? ` · ${patient.sex}` : ''}</p>
+              <p>Profile created {formatDate(patient.created_at)}</p>
+              {patient.latest_scan ? (
+                <div className="directory-last-activity">
+                  <strong>Latest saved scan · {patient.latest_scan.eye_side} eye</strong>
+                  <span>{patient.latest_scan.prediction} · AMD probability {formatProbability(patient.latest_scan.amd_probability)}</span>
+                  <small>Uploaded {formatDate(patient.latest_scan.uploaded_at)}</small>
+                </div>
+              ) : <div className="directory-no-scans">No saved scans</div>}
+              <button type="button" className="secondary-action" onClick={() => onOpenPatient(patient.patient_id)}>Open patient workspace<ChevronRight size={16} /></button>
+            </article>
+          ))}
+        </section>
+      )}
+    </>
+  )
+}
+
+function PatientWorkspace({
+  patient,
+  patientIsLoaded,
+  scans,
+  profileBusy,
+  profileMessage,
+  profileError,
+  historyBusy,
+  historyError,
+  selectedFile,
+  previewUrl,
+  eyeSide,
+  scanDate,
+  visitNotes,
+  savedScan,
+  savedImageUrl,
+  savedImageError,
+  gradcamDataUrl,
+  gradcamError,
+  isAnalyzing,
+  error,
+  onBack,
+  onEyeSideChange,
+  onScanDateChange,
+  onVisitNotesChange,
+  onDrop,
+  onFileChange,
+  onClearImage,
+  onAnalyze,
+  onSelectSavedScan,
+  onSavedImageError,
+}) {
+  if (profileBusy && !patient) return <p className="empty-state">Loading patient workspace…</p>
+  if (!patient) return (
+    <div className="panel directory-empty-panel">
+      <div className="error-box" role="alert">{profileError || 'No patient is selected.'}</div>
+      <button type="button" className="primary-action" onClick={onBack}>Return to patient directory</button>
+    </div>
+  )
+
+  const latestScan = scans.length ? scans[scans.length - 1] : null
+
+  return (
+    <>
+      <section className="workspace-heading">
+        <button type="button" className="text-action back-action" onClick={onBack}><ArrowLeft size={16} /> Patient directory</button>
+        <div className="workspace-title-row">
+          <div><p className="eyebrow">Individual patient workspace</p><h1>{patient.patient_id}</h1><p className="hero-copy">Profile created {formatDate(patient.created_at)} · {scans.length} saved {scans.length === 1 ? 'scan' : 'scans'}</p></div>
+          <button type="button" className="primary-action" onClick={() => document.getElementById('scan-upload')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}><Upload size={16} /> Upload OCT scan</button>
+        </div>
+      </section>
+
+      {profileMessage && <div className="success-box directory-error" role="status">{profileMessage}</div>}
+      {profileError && <div className="error-box directory-error" role="alert">{profileError}</div>}
+
+      <section className="workspace-content-grid">
+        <div className="workspace-main-column">
+          <div className="panel upload-panel" id="scan-upload">
+            <PanelHeader eyebrow="OCT imaging" title="Upload and analyze scan" action="Saved to this patient" />
+            <div className="visit-fields">
+              <label>Eye side
+                <select value={eyeSide} onChange={(event) => onEyeSideChange(event.target.value)}>
+                  <option value="left">Left</option>
+                  <option value="right">Right</option>
+                </select>
+              </label>
+              <label>Scan date <span className="optional-label">(optional)</span>
+                <input type="date" value={scanDate} onChange={(event) => onScanDateChange(event.target.value)} />
+              </label>
+              <label className="visit-notes-field">Visit notes <span className="optional-label">(optional)</span>
+                <textarea maxLength={2000} rows={2} value={visitNotes} onChange={(event) => onVisitNotesChange(event.target.value)} placeholder="Non-identifying notes for this scan" />
+              </label>
+            </div>
+
+            <div className="upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>
+              {previewUrl ? (
+                <div className="image-preview-wrap"><img src={previewUrl} alt="Selected OCT scan preview" /><button className="remove-image" onClick={onClearImage} aria-label="Remove image"><X size={14} /></button></div>
+              ) : (
+                <>
+                  <div className="upload-icon"><CloudUpload size={22} /></div>
+                  <strong>Drop an OCT image here</strong><span>or browse from your device</span>
+                  <label className="browse-button"><Upload size={15} /> Choose image<input type="file" accept="image/jpeg,image/png" onChange={onFileChange} /></label>
+                  <small>JPEG or PNG · up to 20 MB</small>
+                </>
+              )}
+            </div>
+
+            {previewUrl && (
+              <div className="selected-file">
+                <div><FileImage size={16} /><div><b>{selectedFile?.name}</b><span>{patientIsLoaded ? `Ready to save to ${patient.patient_id}` : 'Patient profile is not loaded'}</span></div></div>
+                <button onClick={onAnalyze} className="analyze-button" disabled={isAnalyzing || !patientIsLoaded}>
+                  {isAnalyzing ? 'Analyzing and saving…' : 'Analyze / Save'}<ArrowUpRight size={16} />
+                </button>
+              </div>
+            )}
+            {error && <div className="error-box" role="alert">{error}</div>}
+            {savedScan && <SavedScanSummary scan={savedScan} />}
+            {gradcamError && <div className="info-box">{gradcamError}</div>}
+            {gradcamDataUrl && <div className="gradcam-panel"><img src={gradcamDataUrl} alt="Grad-CAM visualization for the saved scan" /><div className="gradcam-caption">Grad-CAM is an explanation aid only; it does not establish disease location.</div></div>}
+          </div>
+
+          <section className="section-anchor workspace-results">
+            <div className="section-heading"><div><p className="eyebrow">Current saved visit</p><h2>Model output</h2></div><span className="section-note"><Sparkles size={15} /> No clinical risk estimate</span></div>
+            {savedScan ? <div className="model-output-grid">
+              <SummaryCard label="Prediction" value={savedScan.prediction} note={`Eye: ${savedScan.eye_side}`} icon={<ScanLine size={19} />} />
+              <SummaryCard label="AMD probability" value={formatProbability(savedScan.amd_probability)} note="Classifier output; not calibrated clinical risk" icon={<Sparkles size={19} />} />
+              <SummaryCard label="Non-AMD probability" value={formatProbability(savedScan.class_probabilities?.['Non-AMD'])} note="Returned by the model endpoint" icon={<ShieldCheck size={19} />} />
+              <SummaryCard label="Model version" value={savedScan.model_version || 'Not reported'} note={`Scan ID ${savedScan.scan_id}`} icon={<Microscope size={19} />} />
+            </div> : <p className="empty-state">Select a saved scan below or upload an OCT image to display model output.</p>}
+            <p className="data-caveat">Classifier probabilities are not a confirmed diagnosis or calibrated clinical risk. Scan history alone does not establish disease progression.</p>
+          </section>
+        </div>
+
+        <aside className="workspace-side-column">
+          <section className="panel patient-details-panel">
+            <PanelHeader eyebrow="Patient record" title="Profile details" />
+            <div className="patient-detail-row"><span>Patient ID</span><strong>{patient.patient_id}</strong></div>
+            <div className="patient-detail-row"><span>Name / alias</span><strong>{patient.name || 'Not provided (legacy profile)'}</strong></div>
+            <div className="patient-detail-row"><span>Age</span><strong>{patient.age ?? 'Not provided (legacy profile)'}</strong></div>
+            <div className="patient-detail-row"><span>Sex</span><strong>{patient.sex || 'Not provided'}</strong></div>
+            {patient.contact && <div className="patient-detail-row"><span>Contact / reference</span><strong>{patient.contact}</strong></div>}
+            <div className="patient-detail-row"><span>Profile created</span><strong>{formatDate(patient.created_at)}</strong></div>
+            <div className="patient-detail-row"><span>Saved scans</span><strong>{scans.length}</strong></div>
+            {patient.notes && <div className="patient-notes"><span>Profile notes</span><p>{patient.notes}</p></div>}
+            <p className="prototype-warning light-warning">Local demo record only. Do not store identifiable clinical information.</p>
+          </section>
+
+          <section className="panel history-panel">
+            <PanelHeader eyebrow="Patient-specific records" title="Scan history" action={`${scans.length} scans`} />
+            {historyBusy ? <p className="empty-state">Loading saved scan history…</p>
+              : historyError ? <div className="error-box" role="alert">{historyError}</div>
+                : scans.length === 0 ? <p className="empty-state">No saved scans for this patient yet.</p>
+                  : <div className="scan-history-list">
+                    {scans.map((scan) => (
+                      <article className={`scan-history-item ${savedScan?.scan_id === scan.scan_id ? 'scan-history-item-active' : ''}`} key={scan.scan_id}>
+                        <div className="scan-history-summary">
+                          <div><strong>{scan.prediction} <span>· {scan.eye_side} eye</span></strong><small>Scan date: {formatDate(scan.scan_date)} · Uploaded: {formatDate(scan.uploaded_at)}</small><small>AMD probability: {formatProbability(scan.amd_probability)}</small></div>
+                          <button type="button" onClick={() => onSelectSavedScan(scan)} disabled={!scan.image_available}>{scan.image_available ? 'View scan' : 'Image unavailable'}</button>
+                        </div>
+                      </article>
+                    ))}
+                  </div>}
+            {savedScan && (
+              <div className="saved-scan-view">
+                <h3>Saved OCT image and result</h3>
+                {savedScan.image_available === false || savedImageError ? <p className="empty-state">{savedImageError || 'The backend reports that this scan image is unavailable.'}</p>
+                  : savedImageUrl ? <img src={savedImageUrl} alt={`Saved OCT scan ${savedScan.scan_id}`} onError={onSavedImageError} />
+                    : <p className="empty-state">Loading saved OCT image…</p>}
+                <small>Scan ID: {savedScan.scan_id}</small>
+              </div>
+            )}
+          </section>
+        </aside>
+      </section>
+    </>
   )
 }
 
@@ -550,14 +1072,7 @@ function SavedScanSummary({ scan }) {
           ].map(({ label, value }) => (
             <div className="probability-item" key={label}>
               <div className="probability-label"><span>{label}</span><b>{formatProbability(value)}</b></div>
-              <div
-                className="probability-track"
-                role="progressbar"
-                aria-label={`${label} model-generated probability`}
-                aria-valuemin="0"
-                aria-valuemax="100"
-                aria-valuenow={probabilityWidth(value)}
-              >
+              <div className="probability-track" role="progressbar" aria-label={`${label} model-generated probability`} aria-valuemin="0" aria-valuemax="100" aria-valuenow={probabilityWidth(value)}>
                 <div className={`probability-fill probability-fill-${label.toLowerCase()}`} style={{ width: `${probabilityWidth(value)}%` }} />
               </div>
             </div>
@@ -571,17 +1086,22 @@ function SavedScanSummary({ scan }) {
   )
 }
 
-function probabilityWidth(value) {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return 0
-  return Math.min(100, Math.max(0, value * 100))
+function PanelHeader({ eyebrow, title, action }) {
+  return <div className="panel-header"><div><span className="eyebrow-small">{eyebrow}</span><h2>{title}</h2></div>{action && <span className="panel-action">{action}</span>}</div>
+}
+
+function BackendStatus({ status }) {
+  const label = status === 'ready' ? 'Model ready' : status === 'model-unavailable' ? 'Model unavailable' : status === 'offline' ? 'Backend unavailable' : 'Checking backend'
+  return <span className={`live-dot backend-status-${status}`}><i />{label}</span>
 }
 
 function formatProbability(value) {
   return typeof value === 'number' && Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : 'Not available'
 }
 
-function PanelHeader({ eyebrow, title, action }) {
-  return <div className="panel-header"><div><span className="eyebrow-small">{eyebrow}</span><h2>{title}</h2></div>{action && <span className="panel-action">{action}</span>}</div>
+function probabilityWidth(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0
+  return Math.min(100, Math.max(0, value * 100))
 }
 
 function EyeMark() {
