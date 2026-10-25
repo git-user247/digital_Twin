@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from backend import audit as audit_log
 from backend import app as backend_app
 from backend.auth import TOKEN_TTL_SECONDS, create_access_token, hash_password
 
@@ -73,6 +74,13 @@ class DoctorAuthenticationTests(unittest.IsolatedAsyncioTestCase):
         self.environment_patch.start()
         self.addCleanup(self.environment_patch.stop)
         self.temporary_directory = tempfile.TemporaryDirectory()
+        self.audit_patch = patch.object(
+            audit_log,
+            "AUDIT_LOG_PATH",
+            Path(self.temporary_directory.name) / "audit.jsonl",
+        )
+        self.audit_patch.start()
+        self.addCleanup(self.audit_patch.stop)
         self.patient_root_patch = patch.object(
             backend_app,
             "PATIENTS_ROOT",
@@ -104,6 +112,11 @@ class DoctorAuthenticationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(current_status, 200)
         self.assertEqual(current, {"doctor_id": "doctor@example.edu"})
+        audit_text = audit_log.AUDIT_LOG_PATH.read_text(encoding="utf-8")
+        self.assertIn('"event_type":"doctor_login","timestamp":', audit_text)
+        self.assertIn('"status":"success"', audit_text)
+        self.assertNotIn(response["access_token"], audit_text)
+        self.assertNotIn(self.password, audit_text)
 
     async def test_invalid_credentials_are_rejected(self) -> None:
         status_code, response = await _asgi_request(
@@ -113,10 +126,17 @@ class DoctorAuthenticationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(status_code, 401)
         self.assertNotIn("access_token", response)
+        audit_text = audit_log.AUDIT_LOG_PATH.read_text(encoding="utf-8")
+        self.assertIn('"event_type":"doctor_login","timestamp":', audit_text)
+        self.assertIn('"status":"failure"', audit_text)
+        self.assertNotIn(self.password, audit_text)
+        self.assertNotIn(self.secret, audit_text)
+        self.assertNotIn(os.environ["DOCTOR_PASSWORD_HASH"], audit_text)
 
     async def test_protected_patient_and_inference_routes_reject_missing_token(self) -> None:
         protected_requests = (
             ("GET", "/patients"),
+            ("GET", "/patients/Patient_001/report"),
             ("POST", "/patients"),
             ("GET", "/patients/demo"),
             ("POST", "/patients/demo/scans"),
@@ -142,9 +162,10 @@ class DoctorAuthenticationTests(unittest.IsolatedAsyncioTestCase):
             ttl_seconds=-1,
         )
         for token in (invalid_token, expired_token):
-            with self.subTest(token=token):
-                status_code, _ = await _asgi_request("GET", "/patients", token=token)
-                self.assertEqual(status_code, 401)
+            for path in ("/patients", "/patients/Patient_001/report"):
+                with self.subTest(token=token, path=path):
+                    status_code, _ = await _asgi_request("GET", path, token=token)
+                    self.assertEqual(status_code, 401)
 
     async def test_unconfigured_credentials_do_not_allow_login(self) -> None:
         with patch.dict(

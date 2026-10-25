@@ -1,5 +1,7 @@
 # Local patient records
 /data/patients/
+/data/patient_history.json
+/data/audit_events.jsonl
 
 # Python environments, caches, and coverage output
 .venv/

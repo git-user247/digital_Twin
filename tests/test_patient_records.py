@@ -4,6 +4,7 @@ import io
 import json
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -13,6 +14,7 @@ from PIL import Image
 from pydantic import ValidationError
 from starlette.datastructures import Headers
 
+from backend import audit as audit_log
 from backend import app as backend_app
 
 
@@ -35,6 +37,7 @@ class PatientRecordTests(unittest.IsolatedAsyncioTestCase):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.patients_root = Path(self.temporary_directory.name) / "patients"
         self.patients_patch = patch.object(backend_app, "PATIENTS_ROOT", self.patients_root)
+        self.audit_patch = patch.object(audit_log, "AUDIT_LOG_PATH", Path(self.temporary_directory.name) / "audit.jsonl")
         self.service = Mock()
         self.service.model_version = "baseline_efficientnetb0_best.pth:epoch-12"
         self.service.predict_pil_image.return_value = {
@@ -45,8 +48,10 @@ class PatientRecordTests(unittest.IsolatedAsyncioTestCase):
         }
         self.service_patch = patch.object(backend_app, "model_service", self.service)
         self.patients_patch.start()
+        self.audit_patch.start()
         self.service_patch.start()
         self.addCleanup(self.patients_patch.stop)
+        self.addCleanup(self.audit_patch.stop)
         self.addCleanup(self.service_patch.stop)
         self.addCleanup(self.temporary_directory.cleanup)
 
@@ -69,6 +74,7 @@ class PatientRecordTests(unittest.IsolatedAsyncioTestCase):
         eye_side: str = "left",
         scan_date: str | None = None,
         notes: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict:
         response = await backend_app.save_patient_scan(
             patient_id=patient_id,
@@ -76,6 +82,7 @@ class PatientRecordTests(unittest.IsolatedAsyncioTestCase):
             eye_side=eye_side,
             scan_date=scan_date,
             notes=notes,
+            idempotency_key=idempotency_key,
         )
         return response["scan"]
 
@@ -271,6 +278,7 @@ class PatientRecordTests(unittest.IsolatedAsyncioTestCase):
                 patient_id="absent",
                 file=_upload(_png_bytes()),
                 eye_side="left",
+                idempotency_key=None,
             )
         self.assertEqual(caught.exception.status_code, 404)
 
@@ -306,12 +314,121 @@ class PatientRecordTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.status_code, 404)
         self.assertEqual(caught.exception.detail, "Stored scan image is unavailable.")
 
+    async def test_saved_scan_image_is_scoped_to_its_patient(self) -> None:
+        await self._create_patient("Patient_001")
+        await self._create_patient("Patient_002")
+        scan = await self._save_scan("Patient_001", _png_bytes())
+
+        self.assertEqual(backend_app.get_patient_scans("Patient_002")["scans"], [])
+        with self.assertRaises(HTTPException) as caught:
+            backend_app.get_patient_scan_image("Patient_002", scan["scan_id"])
+        self.assertEqual(caught.exception.status_code, 404)
+
     async def test_scan_date_can_be_omitted_and_upload_timestamp_is_server_generated(self) -> None:
         await self._create_patient()
         scan = await self._save_scan("Patient_001", _png_bytes(), eye_side="RIGHT")
         self.assertIsNone(scan["scan_date"])
         self.assertTrue(scan["uploaded_at"].endswith("+00:00"))
         self.assertEqual(scan["eye_side"], "right")
+
+    async def test_upload_uses_detected_image_format_not_filename_extension(self) -> None:
+        await self._create_patient()
+        jpeg_buffer = io.BytesIO()
+        Image.new("RGB", (24, 16), (50, 80, 100)).save(jpeg_buffer, format="JPEG")
+        scan = await self._save_scan("Patient_001", jpeg_buffer.getvalue())
+
+        self.assertEqual(scan["image_extension"], "jpg")
+        image_path = self.patients_root / "Patient_001" / "scans" / scan["scan_id"] / "original.jpg"
+        with Image.open(image_path) as stored_image:
+            self.assertEqual(stored_image.format, "JPEG")
+
+    async def test_failed_prediction_does_not_create_scan_record(self) -> None:
+        await self._create_patient()
+        self.service.predict_pil_image.side_effect = RuntimeError("inference failed")
+
+        with self.assertRaises(HTTPException) as caught:
+            await self._save_scan("Patient_001", _png_bytes())
+
+        self.assertEqual(caught.exception.status_code, 500)
+        scans_directory = self.patients_root / "Patient_001" / "scans"
+        self.assertFalse(scans_directory.exists())
+        self.assertEqual(backend_app.get_patient_scans("Patient_001")["scans"], [])
+
+    async def test_conflicting_scan_id_does_not_overwrite_saved_scan(self) -> None:
+        await self._create_patient()
+        existing = await self._save_scan("Patient_001", _png_bytes())
+        metadata_path = self.patients_root / "Patient_001" / "scans" / existing["scan_id"] / "metadata.json"
+        original_metadata = metadata_path.read_bytes()
+
+        with patch.object(backend_app.uuid, "uuid4", return_value=uuid.UUID(existing["scan_id"])):
+            with self.assertRaises(HTTPException) as caught:
+                await self._save_scan("Patient_001", _png_bytes((210, 10, 10)))
+
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertEqual(metadata_path.read_bytes(), original_metadata)
+        self.assertEqual(len(backend_app.get_patient_scans("Patient_001")["scans"]), 1)
+
+    async def test_scan_upload_retry_replays_record_and_conflicting_payload_is_rejected(self) -> None:
+        await self._create_patient()
+        request_id = str(uuid.uuid4())
+        image = _png_bytes()
+        first = await self._save_scan("Patient_001", image, scan_date="2025-01-01", idempotency_key=request_id)
+        prediction_call_count = self.service.predict_pil_image.call_count
+
+        replay = await self._save_scan("Patient_001", image, scan_date="2025-01-01", idempotency_key=request_id)
+
+        self.assertEqual(replay["scan_id"], first["scan_id"])
+        self.assertNotIn("idempotency_key", replay)
+        self.assertEqual(self.service.predict_pil_image.call_count, prediction_call_count)
+        self.assertEqual(len(backend_app.get_patient_scans("Patient_001")["scans"]), 1)
+
+        with self.assertRaises(HTTPException) as caught:
+            await self._save_scan(
+                "Patient_001",
+                _png_bytes((240, 10, 10)),
+                scan_date="2025-01-01",
+                idempotency_key=request_id,
+            )
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertEqual(len(backend_app.get_patient_scans("Patient_001")["scans"]), 1)
+
+    async def test_audit_failure_does_not_fail_patient_creation(self) -> None:
+        await self._create_patient()
+        with patch.object(audit_log, "AUDIT_LOG_PATH", self.patients_root):
+            created = backend_app.create_patient(
+                backend_app.PatientCreate(patient_id="Patient_002", name="Second alias", age=50)
+            )
+        self.assertEqual(created["patient"]["patient_id"], "Patient_002")
+        self.assertTrue((self.patients_root / "Patient_002" / "profile.json").is_file())
+
+    async def test_malformed_legacy_history_returns_useful_server_error(self) -> None:
+        history_path = Path(self.temporary_directory.name) / "patient_history.json"
+        history_path.write_text("{invalid", encoding="utf-8")
+        with patch.object(backend_app, "PATIENT_HISTORY_PATH", history_path):
+            with self.assertRaises(HTTPException) as caught:
+                backend_app.patient_history(patient_code="demo-001")
+        self.assertEqual(caught.exception.status_code, 500)
+        self.assertEqual(caught.exception.detail, "Legacy patient history is unavailable.")
+
+    async def test_malformed_scan_timestamp_returns_useful_history_error(self) -> None:
+        await self._create_patient()
+        scan_id = str(uuid.uuid4())
+        scan_directory = self.patients_root / "Patient_001" / "scans" / scan_id
+        scan_directory.mkdir(parents=True)
+        (scan_directory / "metadata.json").write_text(
+            json.dumps({
+                "patient_id": "Patient_001",
+                "scan_id": scan_id,
+                "image_extension": "png",
+                "scan_date": None,
+            }),
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(HTTPException) as caught:
+            backend_app.get_patient_scans("Patient_001")
+        self.assertEqual(caught.exception.status_code, 500)
+        self.assertEqual(caught.exception.detail, "Stored scan history is unavailable.")
 
 
 if __name__ == "__main__":

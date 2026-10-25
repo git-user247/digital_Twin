@@ -234,6 +234,13 @@ class UploadValidationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.detail, "Model checkpoint is unavailable.")
         self.fake_service.predict_pil_image.assert_not_called()
 
+    async def test_model_info_does_not_expose_checkpoint_filesystem_path(self) -> None:
+        response = backend_app.model_info()
+        checkpoint = response["model"]["checkpoint"]
+
+        self.assertEqual(checkpoint, Path(backend_app.MODEL_METADATA["checkpoint"]).name)
+        self.assertNotIn(str(backend_app.PROJECT_ROOT), checkpoint)
+
 
 if __name__ == "__main__":
     unittest.main()

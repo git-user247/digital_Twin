@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
   ArrowUpRight,
@@ -6,6 +6,7 @@ import {
   ChevronRight,
   CircleHelp,
   CloudUpload,
+  Download,
   Eye,
   EyeOff,
   FileImage,
@@ -22,6 +23,7 @@ import {
   Users,
   X,
 } from 'lucide-react'
+import { buildDashboardSummary, classifyPrediction } from './dashboardData.js'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/+$/, '')
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024
@@ -47,6 +49,22 @@ function formatDate(value) {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString()
 }
 
+function latestSavedScan(records) {
+  return records.reduce((latest, scan) => {
+    if (!latest) return scan
+    const parsedScanTime = Date.parse(scan.uploaded_at || scan.scan_date || '')
+    const parsedLatestTime = Date.parse(latest.uploaded_at || latest.scan_date || '')
+    const scanTime = Number.isFinite(parsedScanTime) ? parsedScanTime : 0
+    const latestTime = Number.isFinite(parsedLatestTime) ? parsedLatestTime : 0
+    return scanTime > latestTime ? scan : latest
+  }, null)
+}
+
+function scanLabel(scan) {
+  const date = scan.scan_date ? formatDate(scan.scan_date) : `Uploaded ${formatDate(scan.uploaded_at)}`
+  return `${date} · ${scan.eye_side || 'Eye side unavailable'} · ${scan.prediction || 'Prediction unavailable'}`
+}
+
 function App() {
   const [currentView, setCurrentView] = useState('access')
   const [authToken, setAuthToken] = useState(() => {
@@ -57,6 +75,7 @@ function App() {
     }
   })
   const [authChecking, setAuthChecking] = useState(false)
+  const [doctorIdentity, setDoctorIdentity] = useState('')
   const [doctorIdInput, setDoctorIdInput] = useState('')
   const [passwordInput, setPasswordInput] = useState('')
   const [showPassword, setShowPassword] = useState(false)
@@ -66,6 +85,9 @@ function App() {
   const [patients, setPatients] = useState([])
   const [patientsBusy, setPatientsBusy] = useState(false)
   const [patientsError, setPatientsError] = useState('')
+  const [dashboardScans, setDashboardScans] = useState(null)
+  const [dashboardActivityBusy, setDashboardActivityBusy] = useState(false)
+  const [dashboardActivityError, setDashboardActivityError] = useState('')
   const [searchTerm, setSearchTerm] = useState('')
   const [patientForm, setPatientForm] = useState({
     patient_id: '',
@@ -91,6 +113,16 @@ function App() {
   const [savedScan, setSavedScan] = useState(null)
   const [savedImageUrl, setSavedImageUrl] = useState('')
   const [savedImageError, setSavedImageError] = useState('')
+  const [latestImageUrl, setLatestImageUrl] = useState('')
+  const [latestImageError, setLatestImageError] = useState('')
+  const [comparisonScanIds, setComparisonScanIds] = useState(['', ''])
+  const [comparisonImages, setComparisonImages] = useState([])
+  const [comparisonBusy, setComparisonBusy] = useState(false)
+  const [comparisonError, setComparisonError] = useState('')
+  const [reportBusy, setReportBusy] = useState(false)
+  const [reportError, setReportError] = useState('')
+  const reportRequestActive = useRef(false)
+  const scanRequestId = useRef('')
   const [gradcamDataUrl, setGradcamDataUrl] = useState('')
   const [gradcamError, setGradcamError] = useState('')
   const [isAnalyzing, setIsAnalyzing] = useState(false)
@@ -104,10 +136,14 @@ function App() {
   )
   const loadedPatientId = patient?.patient_id || ''
   const patientIsLoaded = Boolean(patient && patientId.trim() === loadedPatientId)
+  const latestScan = useMemo(() => latestSavedScan(scans), [scans])
   const filteredPatients = useMemo(() => {
     const normalizedSearch = searchTerm.trim().toLowerCase()
     if (!normalizedSearch) return patients
-    return patients.filter((record) => record.patient_id.toLowerCase().includes(normalizedSearch))
+    return patients.filter((record) => (
+      record.patient_id.toLowerCase().includes(normalizedSearch)
+      || record.name?.toLowerCase().includes(normalizedSearch)
+    ))
   }, [patients, searchTerm])
 
   const clearSession = (message = '') => {
@@ -121,7 +157,10 @@ function App() {
     setAuthToken('')
     setAuthChecking(false)
     setCurrentView('access')
+    setDoctorIdentity('')
     setPatients([])
+    setDashboardScans(null)
+    setDashboardActivityError('')
     setPatient(null)
     setPatientId('')
     setScans([])
@@ -133,6 +172,12 @@ function App() {
     setSavedScan(null)
     setSavedImageUrl('')
     setSavedImageError('')
+    setLatestImageUrl('')
+    setLatestImageError('')
+    setComparisonImages([])
+    setComparisonScanIds(['', ''])
+    setComparisonError('')
+    setReportError('')
     setGradcamDataUrl('')
     setGradcamError('')
     setError('')
@@ -183,14 +228,9 @@ function App() {
       })
       .then(async (doctor) => {
         if (!mounted || !doctor) return
+        setDoctorIdentity(doctor.doctor_id || '')
         setCurrentView('dashboard')
-        try {
-          const directoryResponse = await protectedFetch(`${API_BASE}/patients`, {}, authToken)
-          const directory = await readResponse(directoryResponse, 'Unable to load the patient directory.')
-          setPatients(Array.isArray(directory.patients) ? directory.patients : [])
-        } catch (requestError) {
-          if (mounted) setPatientsError(requestError.message || 'Unable to load the patient directory.')
-        }
+        await loadDashboardData(authToken)
 
         let storedPatientId
         try {
@@ -215,7 +255,10 @@ function App() {
             authToken,
           )
           const historyPayload = await readResponse(historyResponse, 'Unable to restore patient scan history.')
-          if (mounted) setScans(Array.isArray(historyPayload.scans) ? historyPayload.scans : [])
+          const records = Array.isArray(historyPayload.scans) ? historyPayload.scans : []
+          if (mounted) {
+            setScans(records)
+          }
         } catch {
           try {
             window.localStorage.removeItem(SELECTED_PATIENT_KEY)
@@ -242,16 +285,27 @@ function App() {
     if (savedImageUrl) URL.revokeObjectURL(savedImageUrl)
   }, [savedImageUrl])
 
+  useEffect(() => () => {
+    if (latestImageUrl) URL.revokeObjectURL(latestImageUrl)
+  }, [latestImageUrl])
+
+  useEffect(() => () => {
+    comparisonImages.forEach((entry) => URL.revokeObjectURL(entry.url))
+  }, [comparisonImages])
+
   const loadPatientScans = async (id, token = authToken) => {
     setHistoryBusy(true)
     setHistoryError('')
     try {
       const response = await protectedFetch(`${API_BASE}/patients/${encodeURIComponent(id)}/scans`, {}, token)
       const payload = await readResponse(response, 'Unable to load this patient’s scan history.')
-      setScans(Array.isArray(payload.scans) ? payload.scans : [])
+      const records = Array.isArray(payload.scans) ? payload.scans : []
+      setScans(records)
+      return records
     } catch (requestError) {
       setScans([])
       setHistoryError(requestError.message || 'Unable to load this patient’s scan history.')
+      return null
     } finally {
       setHistoryBusy(false)
     }
@@ -274,6 +328,39 @@ function App() {
       return null
     } finally {
       setPatientsBusy(false)
+    }
+  }
+
+  const loadDashboardData = async (token = authToken) => {
+    setDashboardScans(null)
+    setDashboardActivityBusy(true)
+    setDashboardActivityError('')
+    try {
+      const directory = await loadPatients(token)
+      if (!directory) return
+
+      const patientHistories = await Promise.all(directory.map(async (record) => {
+        const response = await protectedFetch(
+          `${API_BASE}/patients/${encodeURIComponent(record.patient_id)}/scans`,
+          {},
+          token,
+        )
+        const payload = await readResponse(response, `Unable to load saved scans for patient ${record.patient_id}.`)
+        if (
+          payload.patient_id !== record.patient_id
+          || !Array.isArray(payload.scans)
+          || payload.scans.some((scan) => scan.patient_id !== record.patient_id)
+        ) {
+          throw new Error(`The backend returned invalid scan history for patient ${record.patient_id}.`)
+        }
+        return payload.scans
+      }))
+      setDashboardScans(patientHistories.flat())
+    } catch (requestError) {
+      setDashboardScans(null)
+      setDashboardActivityError(requestError.message || 'Unable to load saved scan activity.')
+    } finally {
+      setDashboardActivityBusy(false)
     }
   }
 
@@ -322,6 +409,7 @@ function App() {
       setVisitNotes('')
     }
     setProfileBusy(true)
+    scanRequestId.current = ''
     setProfileError('')
     setProfileMessage('')
     setPatient(null)
@@ -329,6 +417,12 @@ function App() {
     setSavedScan(null)
     setSavedImageUrl('')
     setSavedImageError('')
+    setLatestImageUrl('')
+    setLatestImageError('')
+    setComparisonImages([])
+    setComparisonScanIds(['', ''])
+    setComparisonError('')
+    setReportError('')
     setGradcamDataUrl('')
     setGradcamError('')
     setError('')
@@ -342,7 +436,13 @@ function App() {
       } catch {
         setProfileMessage('Patient loaded, but this browser could not remember it after refresh.')
       }
-      await loadPatientScans(payload.patient.patient_id)
+      const records = await loadPatientScans(payload.patient.patient_id)
+      setCurrentView('workspace')
+      if (records?.length) {
+        const latest = latestSavedScan(records)
+        await loadLatestImage(records, payload.patient.patient_id)
+        await selectSavedScan(latest, payload.patient.patient_id, records)
+      }
       setCurrentView('workspace')
     } catch (requestError) {
       setProfileError(requestError.message || 'Unable to load the patient profile.')
@@ -389,7 +489,7 @@ function App() {
       })
       const payload = await readResponse(response, 'Unable to create the patient profile.')
       setPatientForm({ patient_id: '', name: '', age: '', sex: '', contact: '', notes: '' })
-      await loadPatients()
+      await loadDashboardData()
       await openPatient(payload.patient.patient_id)
       setProfileMessage('Patient profile created and opened.')
     } catch (requestError) {
@@ -416,6 +516,7 @@ function App() {
       return
     }
     setError('')
+    scanRequestId.current = ''
     setSelectedFile(file)
     setPreviewUrl(URL.createObjectURL(file))
     setSavedScan(null)
@@ -453,35 +554,27 @@ function App() {
     if (visitNotes.trim()) formData.append('notes', visitNotes.trim())
 
     try {
+      if (!scanRequestId.current) {
+        scanRequestId.current = window.crypto.randomUUID()
+      }
       const response = await protectedFetch(`${API_BASE}/patients/${encodeURIComponent(patientId.trim())}/scans`, {
         method: 'POST',
+        headers: { 'Idempotency-Key': scanRequestId.current },
         body: formData,
       })
       const payload = await readResponse(response, 'Unable to analyze and save the scan.')
       if (!payload.scan?.scan_id || !payload.scan?.prediction || !payload.scan?.class_probabilities) {
         throw new Error('The backend returned an incomplete saved-scan response.')
       }
-      setSavedScan(payload.scan)
-      await loadSavedImage(payload.scan)
-      await loadPatientScans(patientId.trim())
-      await loadPatients()
-
-      const explanationForm = new FormData()
-      explanationForm.append('file', selectedFile)
-      try {
-        const explanationResponse = await protectedFetch(`${API_BASE}/gradcam`, {
-          method: 'POST',
-          body: explanationForm,
-        })
-        const explanation = await readResponse(explanationResponse, 'Grad-CAM is unavailable for this scan.')
-        if (explanation.gradcam_base64) {
-          setGradcamDataUrl(`data:image/png;base64,${explanation.gradcam_base64}`)
-        } else {
-          setGradcamError('Grad-CAM response did not include an image.')
-        }
-      } catch (explanationError) {
-        setGradcamError(explanationError.message || 'Grad-CAM is unavailable for this scan.')
+      scanRequestId.current = ''
+      const records = await loadPatientScans(patientId.trim())
+      if (records) {
+        const latest = latestSavedScan(records)
+        await loadLatestImage(records, patientId.trim())
+        const savedRecord = records.find((record) => record.scan_id === payload.scan.scan_id)
+        await selectSavedScan(savedRecord || latest, patientId.trim(), records)
       }
+      await loadDashboardData()
     } catch (requestError) {
       setError(requestError.message || 'The backend could not process and save this scan.')
     } finally {
@@ -490,6 +583,7 @@ function App() {
   }
 
   const clearImage = () => {
+    scanRequestId.current = ''
     setSelectedFile(null)
     setPreviewUrl('')
     setSavedScan(null)
@@ -499,25 +593,156 @@ function App() {
     setError('')
   }
 
-  const loadSavedImage = async (scan, token = authToken) => {
-    setSavedImageUrl('')
-    setSavedImageError('')
-    try {
-      const response = await protectedFetch(`${API_BASE}${scan.image_url}`, {}, token)
-      const imageUrl = URL.createObjectURL(await response.blob())
-      setSavedImageUrl(imageUrl)
-    } catch (requestError) {
-      setSavedImageError(requestError.message || 'Unable to retrieve this saved image from the backend.')
+  const fetchStoredScanImage = async (ownerPatientId, scan, records = scans, token = authToken) => {
+    if (!ownerPatientId || scan.patient_id !== ownerPatientId) {
+      throw new Error('The selected scan does not belong to the current patient.')
     }
+    const storedScan = records.find((record) => record.scan_id === scan.scan_id)
+    if (!storedScan || storedScan.patient_id !== ownerPatientId) {
+      throw new Error('The selected scan is not part of this patient’s saved history.')
+    }
+    if (!storedScan.image_available) {
+      throw new Error('The backend reports that this saved scan image is unavailable.')
+    }
+    const imagePath = `/patients/${encodeURIComponent(ownerPatientId)}/scans/${encodeURIComponent(scan.scan_id)}/image`
+    const response = await protectedFetch(`${API_BASE}${imagePath}`, {}, token)
+    if (!response.ok) {
+      await readResponse(response, 'Unable to retrieve the saved scan image.')
+    }
+    return response.blob()
   }
 
-  const selectSavedScan = async (scan) => {
-    setSavedScan(scan)
+  const selectSavedScan = async (scan, ownerPatientId = patient?.patient_id, records = scans) => {
+    const storedScan = records.find((record) => record.scan_id === scan.scan_id)
+    if (
+      !storedScan
+      || storedScan.patient_id !== ownerPatientId
+    ) {
+      setSavedImageError('The selected scan does not belong to the current patient.')
+      return
+    }
+    setSavedScan(storedScan)
     setSavedImageError('')
     setSavedImageUrl('')
     setGradcamDataUrl('')
     setGradcamError('')
-    await loadSavedImage(scan)
+    let imageBlob
+    try {
+      imageBlob = await fetchStoredScanImage(ownerPatientId, storedScan, records)
+      setSavedImageUrl(URL.createObjectURL(imageBlob))
+    } catch (requestError) {
+      setSavedImageError(requestError.message || 'Unable to retrieve this saved scan image.')
+      return
+    }
+    try {
+      const formData = new FormData()
+      const extension = imageBlob.type === 'image/jpeg' ? 'jpg' : 'png'
+      formData.append('file', imageBlob, `scan-${storedScan.scan_id}.${extension}`)
+      const response = await protectedFetch(`${API_BASE}/gradcam`, {
+        method: 'POST',
+        body: formData,
+      })
+      const explanation = await readResponse(response, 'Grad-CAM is unavailable for this saved scan.')
+      if (explanation.gradcam_base64) {
+        setGradcamDataUrl(`data:image/png;base64,${explanation.gradcam_base64}`)
+      } else {
+        setGradcamError('Grad-CAM response did not include an image.')
+      }
+    } catch (requestError) {
+      setGradcamError(requestError.message || 'Grad-CAM is unavailable for this saved scan.')
+    }
+  }
+
+  const loadLatestImage = async (records, ownerPatientId) => {
+    setLatestImageUrl('')
+    setLatestImageError('')
+    const latest = latestSavedScan(records)
+    if (!latest || latest.patient_id !== ownerPatientId) return
+    try {
+      const blob = await fetchStoredScanImage(ownerPatientId, latest, records)
+      setLatestImageUrl(URL.createObjectURL(blob))
+    } catch (requestError) {
+      setLatestImageError(requestError.message || 'Unable to retrieve the latest saved scan image.')
+    }
+  }
+
+  const compareSelectedScans = async () => {
+    const [firstId, secondId] = comparisonScanIds
+    if (!patient?.patient_id || !firstId || !secondId) {
+      setComparisonError('Select two saved scans to compare.')
+      return
+    }
+    if (firstId === secondId) {
+      setComparisonError('Choose two different saved scans.')
+      return
+    }
+    const first = scans.find((scan) => scan.scan_id === firstId)
+    const second = scans.find((scan) => scan.scan_id === secondId)
+    if (!first || !second || first.patient_id !== patient.patient_id || second.patient_id !== patient.patient_id) {
+      setComparisonError('Both scans must belong to the currently selected patient.')
+      return
+    }
+
+    setComparisonBusy(true)
+    setComparisonError('')
+    setComparisonImages([])
+    try {
+      const [firstBlob, secondBlob] = await Promise.all([
+        fetchStoredScanImage(patient.patient_id, first),
+        fetchStoredScanImage(patient.patient_id, second),
+      ])
+      setComparisonImages([
+        { scanId: first.scan_id, url: URL.createObjectURL(firstBlob) },
+        { scanId: second.scan_id, url: URL.createObjectURL(secondBlob) },
+      ])
+    } catch (requestError) {
+      setComparisonError(requestError.message || 'Unable to load the selected saved scans.')
+    } finally {
+      setComparisonBusy(false)
+    }
+  }
+
+  const exportRetinalTwinReport = async () => {
+    if (!patientIsLoaded || reportRequestActive.current) return
+    reportRequestActive.current = true
+    setReportBusy(true)
+    setReportError('')
+    try {
+      const query = new URLSearchParams()
+      const [firstId, secondId] = comparisonScanIds
+      const first = scans.find((scan) => scan.scan_id === firstId && scan.patient_id === patient.patient_id)
+      const second = scans.find((scan) => scan.scan_id === secondId && scan.patient_id === patient.patient_id)
+      if (first && second && first.scan_id !== second.scan_id) {
+        query.set('first_scan_id', first.scan_id)
+        query.set('second_scan_id', second.scan_id)
+      }
+      const comparisonQuery = query.toString()
+      const queryString = comparisonQuery ? `?${comparisonQuery}` : ''
+      const response = await protectedFetch(
+        `${API_BASE}/patients/${encodeURIComponent(patient.patient_id)}/report${queryString}`,
+      )
+      if (!response.ok) {
+        await readResponse(response, 'Unable to generate the Retinal Twin report.')
+      }
+      if (!response.headers.get('content-type')?.toLowerCase().includes('application/pdf')) {
+        throw new Error('The backend returned an invalid report file.')
+      }
+      const reportBlob = await response.blob()
+      if (!reportBlob.size) throw new Error('The generated report file is empty.')
+      const downloadUrl = URL.createObjectURL(reportBlob)
+      const downloadLink = document.createElement('a')
+      downloadLink.href = downloadUrl
+      downloadLink.download = `ocutwin-retinal-twin-${patient.patient_id}.pdf`
+      document.body.appendChild(downloadLink)
+      downloadLink.click()
+      downloadLink.remove()
+      window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000)
+    } catch (requestError) {
+      setReportError(requestError.message || 'Unable to generate the Retinal Twin report.')
+    } finally {
+      reportRequestActive.current = false
+      setReportBusy(false)
+    }
   }
 
   const logout = () => {
@@ -624,12 +849,19 @@ function App() {
         <div className="page-wrap doctor-page-wrap">
           {currentView === 'dashboard' && (
             <DoctorDashboard
+              doctorIdentity={doctorIdentity}
               patients={patients}
-              isLoading={patientsBusy}
+              scans={dashboardScans}
+              isLoading={patientsBusy || dashboardActivityBusy}
               error={patientsError}
+              activityError={dashboardActivityError}
               modelInfo={modelInfo}
-              onRetry={loadPatients}
+              searchTerm={searchTerm}
+              onSearchChange={setSearchTerm}
+              onRetry={loadDashboardData}
               onOpenDirectory={() => setCurrentView('directory')}
+              onCreatePatient={() => setCurrentView('directory')}
+              onLogout={logout}
               onOpenPatient={openPatient}
             />
           )}
@@ -669,15 +901,27 @@ function App() {
               scanDate={scanDate}
               visitNotes={visitNotes}
               savedScan={savedScan}
+              latestScan={latestScan}
+              latestImageUrl={latestImageUrl}
+              latestImageError={latestImageError}
               savedImageError={savedImageError}
               gradcamDataUrl={gradcamDataUrl}
               gradcamError={gradcamError}
               isAnalyzing={isAnalyzing}
               error={error}
               onBack={returnToDirectory}
-              onEyeSideChange={setEyeSide}
-              onScanDateChange={setScanDate}
-              onVisitNotesChange={setVisitNotes}
+              onEyeSideChange={(value) => {
+                scanRequestId.current = ''
+                setEyeSide(value)
+              }}
+              onScanDateChange={(value) => {
+                scanRequestId.current = ''
+                setScanDate(value)
+              }}
+              onVisitNotesChange={(value) => {
+                scanRequestId.current = ''
+                setVisitNotes(value)
+              }}
               onDrop={handleDrop}
               onFileChange={(event) => handleFile(event.target.files?.[0])}
               onClearImage={clearImage}
@@ -685,6 +929,19 @@ function App() {
               onSelectSavedScan={selectSavedScan}
               savedImageUrl={savedImageUrl}
               onSavedImageError={() => setSavedImageError('Unable to retrieve this saved image from the backend.')}
+              comparisonScanIds={comparisonScanIds}
+              onComparisonScanChange={(index, value) => {
+                setComparisonScanIds((current) => current.map((id, slot) => slot === index ? value : id))
+                setComparisonImages([])
+                setComparisonError('')
+              }}
+              comparisonImages={comparisonImages}
+              comparisonBusy={comparisonBusy}
+              comparisonError={comparisonError}
+              onCompareScans={compareSelectedScans}
+              reportBusy={reportBusy}
+              reportError={reportError}
+              onExportReport={exportRetinalTwinReport}
             />
           )}
         </div>
@@ -693,65 +950,133 @@ function App() {
   )
 }
 
-function DoctorDashboard({ patients, isLoading, error, modelInfo, onRetry, onOpenDirectory, onOpenPatient }) {
-  const totalScans = patients.reduce((total, patient) => total + patient.scan_count, 0)
-  const recentActivity = patients
-    .filter((patient) => patient.latest_scan)
-    .sort((first, second) => new Date(second.latest_scan.uploaded_at) - new Date(first.latest_scan.uploaded_at))
-    .slice(0, 5)
+function DoctorDashboard({
+  doctorIdentity,
+  patients,
+  scans,
+  isLoading,
+  error,
+  activityError,
+  modelInfo,
+  searchTerm,
+  onSearchChange,
+  onRetry,
+  onOpenDirectory,
+  onCreatePatient,
+  onLogout,
+  onOpenPatient,
+}) {
+  const activityScans = Array.isArray(scans) ? scans : []
+  const {
+    matchingPatients,
+    recentPatients,
+    recentScans,
+    predictionCounts,
+  } = buildDashboardSummary(patients, activityScans, searchTerm)
+  const normalizedSearch = searchTerm.trim().toLowerCase()
+  const dataReady = !isLoading && !error && !activityError && Array.isArray(scans)
 
   return (
     <>
       <section className="doctor-page-heading">
         <div>
-          <p className="eyebrow">Clinical workflow demonstration</p>
-          <h1>Doctor dashboard</h1>
-          <p className="hero-copy">Review registered local demo patients and their latest saved OCT activity. This prototype does not provide clinical risk or progression estimates.</p>
+          <p className="eyebrow">Experimental retinal digital-twin prototype</p>
+          <h1>{doctorIdentity ? `Welcome, ${doctorIdentity}` : 'Doctor overview'}</h1>
+          <p className="hero-copy">Overview of your recorded retinal observations. Counts summarize saved records only; they are not clinical outcomes or prevalence estimates.</p>
         </div>
-        <button type="button" className="primary-action" onClick={onOpenDirectory}><Users size={17} /> Open patient directory</button>
+        <div className="dashboard-actions">
+          <button type="button" className="primary-action" onClick={onCreatePatient}><UserRound size={16} /> New patient</button>
+          <button type="button" className="secondary-action" onClick={onOpenDirectory}><Users size={16} /> Patient directory</button>
+          <button type="button" className="dashboard-logout" onClick={onLogout}><LogOut size={15} /> Logout</button>
+        </div>
       </section>
 
-      <section className="overview-grid doctor-overview-grid" aria-label="Live local record summary">
-        <SummaryCard label="Registered patients" value={isLoading ? '…' : error ? '—' : String(patients.length)} note="Read from local patient storage" icon={<Users size={19} />} />
-        <SummaryCard label="Saved OCT scans" value={isLoading ? '…' : error ? '—' : String(totalScans)} note="Stored scan records" icon={<ScanLine size={19} />} />
-        <SummaryCard label="Model status" value={modelInfo?.ready ? 'Ready' : 'Unavailable'} note={modelInfo?.model?.architecture || 'Backend status'} icon={<Microscope size={19} />} />
+      <section className="overview-grid doctor-overview-grid" aria-label="Saved record counts">
+        <SummaryCard label="Total patients" value={isLoading ? '…' : error ? 'Unavailable' : String(patients.length)} note="Registered local profiles" icon={<Users size={19} />} />
+        <SummaryCard label="Total recorded scans" value={isLoading ? '…' : dataReady ? String(scans.length) : 'Unavailable'} note="Saved OCT records" icon={<ScanLine size={19} />} />
+        <SummaryCard label="AMD predictions" value={isLoading ? '…' : dataReady ? String(predictionCounts.AMD) : 'Unavailable'} note="Saved model predictions" icon={<Sparkles size={19} />} />
+        <SummaryCard label="Non-AMD predictions" value={isLoading ? '…' : dataReady ? String(predictionCounts['Non-AMD']) : 'Unavailable'} note="Saved model predictions" icon={<ShieldCheck size={19} />} />
       </section>
 
+      {modelInfo && <p className="dashboard-model-status"><Microscope size={15} /> Current model service: {modelInfo.ready ? 'Ready' : 'Unavailable'}{modelInfo.model?.architecture ? ` · ${modelInfo.model.architecture}` : ''}</p>}
       {error && <div className="error-box directory-error" role="alert">{error}<button type="button" onClick={onRetry}>Retry</button></div>}
-      {isLoading && <p className="empty-state">Loading patient and recent activity from the backend…</p>}
+      {activityError && <div className="error-box directory-error" role="alert">{activityError}<button type="button" onClick={onRetry}>Retry scan activity</button></div>}
+      {isLoading && <p className="empty-state">Loading registered patients and saved scan records…</p>}
       {!isLoading && !error && patients.length === 0 && (
         <div className="panel directory-empty-panel">
           <h2>No registered patients yet</h2>
-          <p className="empty-state">Create a patient profile in the directory to begin a local demonstration.</p>
-          <button type="button" className="primary-action" onClick={onOpenDirectory}>Go to patient directory</button>
+          <p className="empty-state">Create a local patient profile to begin recording OCT observations.</p>
+          <button type="button" className="primary-action" onClick={onCreatePatient}>Register first patient</button>
         </div>
       )}
 
       {!isLoading && !error && patients.length > 0 && (
-        <section className="panel recent-activity-panel">
-          <div className="panel-header">
-            <div><span className="eyebrow-small">From saved scan records</span><h2>Recent activity</h2></div>
-            <button type="button" className="text-action" onClick={onOpenDirectory}>View all patients<ChevronRight size={15} /></button>
-          </div>
-          {recentActivity.length === 0 ? <p className="empty-state">No saved scan activity is available yet.</p> : (
-            <div className="recent-activity-list">
-              {recentActivity.map(({ patient_id: id, latest_scan: scan }) => (
-                <button type="button" className="recent-activity-item" key={id} onClick={() => onOpenPatient(id)}>
-                  <span className="activity-icon"><ScanLine size={17} /></span>
-                  <span className="activity-copy">
-                    <strong>{id} <i>· {scan.eye_side} eye · {scan.prediction}</i></strong>
-                    <small>Uploaded {formatDate(scan.uploaded_at)}{scan.scan_date ? ` · Scan date ${formatDate(scan.scan_date)}` : ' · Scan date not provided'}</small>
-                  </span>
-                  <ChevronRight size={16} />
-                </button>
-              ))}
+        <div className="dashboard-activity-grid">
+          <section className="panel recent-activity-panel">
+            <div className="panel-header">
+              <div><span className="eyebrow-small">Patient records</span><h2>Recent patient activity</h2></div>
+              <button type="button" className="text-action" onClick={onOpenDirectory}>Full directory<ChevronRight size={15} /></button>
             </div>
-          )}
-          <p className="data-caveat">Recent activity uses saved upload timestamps; an upload time is not a scan acquisition date.</p>
-        </section>
+            <label className="dashboard-search"><Search size={16} /><input value={searchTerm} onChange={(event) => onSearchChange(event.target.value)} placeholder="Search patient ID or name" aria-label="Search patients by ID or name" /></label>
+            {activityError ? <p className="empty-state">Patient list is available, but scan-based activity could not be loaded.</p>
+              : recentPatients.length === 0 ? <p className="empty-state">{normalizedSearch ? 'No patients match this search.' : 'No patient activity is available.'}</p>
+                : (
+                  <div className="recent-patient-list">
+                    <div className="recent-patient-row recent-patient-header"><span>Patient</span><span>Scans</span><span>Latest scan date</span><span>Prediction</span><span /></div>
+                    {recentPatients.map((record) => (
+                      <div className="recent-patient-row" key={record.patient_id}>
+                        <div className="dashboard-patient-cell"><strong>{record.name || record.patient_id}</strong>{record.name && <small>ID {record.patient_id}</small>}</div>
+                        <span>{record.savedScanCount}</span>
+                        <span>{formatDate(record.latestScan?.scan_date)}</span>
+                        <PredictionBadge prediction={record.latestScan?.prediction} />
+                        <button type="button" className="text-action" onClick={() => onOpenPatient(record.patient_id)}>Open twin<ChevronRight size={14} /></button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+            <p className="data-caveat">Ordering uses latest scan upload timestamp, then recorded scan date; patients without scans use profile creation time. Upload time is not scan acquisition time.</p>
+          </section>
+
+          <section className="panel recent-scan-panel">
+            <div className="panel-header">
+              <div><span className="eyebrow-small">Saved OCT records</span><h2>Recent scan activity</h2></div>
+            </div>
+            {activityError ? <p className="empty-state">Saved scan activity could not be loaded.</p>
+              : !dataReady ? <p className="empty-state">Loading saved OCT records…</p>
+                : recentScans.length === 0 ? <p className="empty-state">Patients are registered, but no scans have been saved yet.</p>
+                  : <div className="recent-scan-list">
+                    {recentScans.map((scan) => {
+                      const owner = patients.find((record) => record.patient_id === scan.patient_id)
+                      if (!owner || scan.patient_id !== owner.patient_id) return null
+                      return (
+                        <article className="recent-scan-item" key={`${scan.patient_id}-${scan.scan_id}`}>
+                          <div className="recent-scan-top">
+                            <div><strong>{owner.name || owner.patient_id}</strong>{owner.name && <small>ID {owner.patient_id}</small>}</div>
+                            <PredictionBadge prediction={scan.prediction} />
+                          </div>
+                          <div className="recent-scan-details">
+                            <span>{scan.scan_date ? `Scan date ${formatDate(scan.scan_date)}` : `Scan date not provided · Uploaded ${formatDate(scan.uploaded_at)}`}</span>
+                            <span>{scan.eye_side ? `${scan.eye_side} eye` : 'Eye side not provided'}</span>
+                            <span>AMD {formatProbability(scan.class_probabilities?.AMD ?? scan.amd_probability)} · Non-AMD {formatProbability(scan.class_probabilities?.['Non-AMD'])}</span>
+                          </div>
+                          <button type="button" className="text-action" onClick={() => onOpenPatient(owner.patient_id)}>Open Retinal Twin Profile<ChevronRight size={14} /></button>
+                        </article>
+                      )
+                    })}
+                  </div>}
+            <p className="data-caveat">Activity is ordered by saved upload timestamp, with recorded scan date used only when upload time is unavailable.</p>
+          </section>
+        </div>
       )}
     </>
   )
+}
+
+function PredictionBadge({ prediction }) {
+  const classification = classifyPrediction(prediction)
+  return classification
+    ? <span className={`prediction-badge prediction-badge-${classification === 'AMD' ? 'amd' : 'non-amd'}`}>{classification}</span>
+    : <span className="prediction-badge prediction-badge-unavailable">Unavailable</span>
 }
 
 function PatientDirectory({
@@ -911,6 +1236,9 @@ function PatientWorkspace({
   scanDate,
   visitNotes,
   savedScan,
+  latestScan,
+  latestImageUrl,
+  latestImageError,
   savedImageUrl,
   savedImageError,
   gradcamDataUrl,
@@ -927,6 +1255,15 @@ function PatientWorkspace({
   onAnalyze,
   onSelectSavedScan,
   onSavedImageError,
+  comparisonScanIds,
+  onComparisonScanChange,
+  comparisonImages,
+  comparisonBusy,
+  comparisonError,
+  onCompareScans,
+  reportBusy,
+  reportError,
+  onExportReport,
 }) {
   if (profileBusy && !patient) return <p className="empty-state">Loading patient workspace…</p>
   if (!patient) return (
@@ -936,20 +1273,71 @@ function PatientWorkspace({
     </div>
   )
 
-  const latestScan = scans.length ? scans[scans.length - 1] : null
-
   return (
     <>
       <section className="workspace-heading">
         <button type="button" className="text-action back-action" onClick={onBack}><ArrowLeft size={16} /> Patient directory</button>
         <div className="workspace-title-row">
-          <div><p className="eyebrow">Individual patient workspace</p><h1>{patient.patient_id}</h1><p className="hero-copy">Profile created {formatDate(patient.created_at)} · {scans.length} saved {scans.length === 1 ? 'scan' : 'scans'}</p></div>
-          <button type="button" className="primary-action" onClick={() => document.getElementById('scan-upload')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}><Upload size={16} /> Upload OCT scan</button>
+          <div><p className="eyebrow">Experimental retinal digital twin</p><h1>Retinal Twin Profile</h1><p className="hero-copy">{patient.name || patient.patient_id} · ID {patient.patient_id} · {scans.length} actual saved {scans.length === 1 ? 'OCT observation' : 'OCT observations'}</p></div>
+          <div className="workspace-actions">
+            <button type="button" className="secondary-action" onClick={onExportReport} disabled={reportBusy || !patientIsLoaded}>
+              <Download size={16} /> {reportBusy ? 'Generating report…' : 'Export Retinal Twin Report'}
+            </button>
+            <button type="button" className="primary-action" onClick={() => document.getElementById('scan-upload')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}><Upload size={16} /> Upload OCT scan</button>
+          </div>
         </div>
       </section>
 
       {profileMessage && <div className="success-box directory-error" role="status">{profileMessage}</div>}
       {profileError && <div className="error-box directory-error" role="alert">{profileError}</div>}
+      {reportError && <div className="error-box directory-error" role="alert">{reportError}</div>}
+
+      <section className="panel twin-summary-panel">
+        <div className="twin-summary-identity">
+          <span className="directory-patient-icon"><UserRound size={19} /></span>
+          <div><span className="eyebrow-small">Patient-specific record</span><h2>{patient.name || 'Name / alias not provided'}</h2><p>{patient.patient_id} · Age {patient.age ?? 'not provided'}{patient.sex ? ` · ${patient.sex}` : ''}</p></div>
+        </div>
+        <div className="twin-summary-meta">
+          <div><span>Saved OCT observations</span><strong>{scans.length}</strong></div>
+          <div><span>Profile created</span><strong>{formatDate(patient.created_at)}</strong></div>
+        </div>
+      </section>
+
+      <section className="panel latest-observation-panel">
+        <PanelHeader eyebrow="Latest saved observation" title="Latest OCT scan and model output" action={latestScan ? `Saved ${formatDate(latestScan.uploaded_at)}` : 'No saved observations'} />
+        {!historyBusy && !historyError && !latestScan ? (
+          <div className="twin-empty-state">
+            <ScanLine size={22} />
+            <div><strong>No OCT observations saved yet</strong><p>Upload the patient’s first OCT scan to begin this experimental retinal twin profile.</p></div>
+          </div>
+        ) : historyBusy ? <p className="empty-state">Loading saved observations from the backend…</p>
+          : historyError ? <div className="error-box" role="alert">{historyError}</div>
+            : (
+              <div className="latest-observation-grid">
+                <div className="latest-image-panel">
+                  {latestScan.image_available === false || latestImageError
+                    ? <p className="empty-state">{latestImageError || 'The latest saved image is unavailable.'}</p>
+                    : latestImageUrl
+                      ? <img src={latestImageUrl} alt={`Latest saved OCT scan ${latestScan.scan_id}`} />
+                      : <p className="empty-state">Loading latest saved OCT image…</p>}
+                </div>
+                <div className="latest-observation-details">
+                  <div className="latest-prediction"><span>Saved prediction</span><strong>{latestScan.prediction || 'Not available'}</strong></div>
+                  <div className="latest-facts">
+                    <div><span>Scan date</span><strong>{formatDate(latestScan.scan_date)}</strong></div>
+                    <div><span>Eye side</span><strong>{latestScan.eye_side || 'Not provided'}</strong></div>
+                    <div><span>Model version</span><strong>{latestScan.model_version || 'Not reported'}</strong></div>
+                    <div><span>Uploaded</span><strong>{formatDate(latestScan.uploaded_at)}</strong></div>
+                  </div>
+                  <div className="latest-probabilities">
+                    <SummaryCard label="AMD probability" value={formatProbability(latestScan.class_probabilities?.AMD ?? latestScan.amd_probability)} note="Stored classifier output" icon={<Sparkles size={18} />} />
+                    <SummaryCard label="Non-AMD probability" value={formatProbability(latestScan.class_probabilities?.['Non-AMD'])} note="Stored classifier output" icon={<ShieldCheck size={18} />} />
+                  </div>
+                  <p className="data-caveat">Model-generated probabilities are not a confirmed diagnosis or calibrated clinical risk.</p>
+                </div>
+              </div>
+            )}
+      </section>
 
       <section className="workspace-content-grid">
         <div className="workspace-main-column">
@@ -993,19 +1381,66 @@ function PatientWorkspace({
             )}
             {error && <div className="error-box" role="alert">{error}</div>}
             {savedScan && <SavedScanSummary scan={savedScan} />}
-            {gradcamError && <div className="info-box">{gradcamError}</div>}
-            {gradcamDataUrl && <div className="gradcam-panel"><img src={gradcamDataUrl} alt="Grad-CAM visualization for the saved scan" /><div className="gradcam-caption">Grad-CAM is an explanation aid only; it does not establish disease location.</div></div>}
           </div>
 
           <section className="section-anchor workspace-results">
-            <div className="section-heading"><div><p className="eyebrow">Current saved visit</p><h2>Model output</h2></div><span className="section-note"><Sparkles size={15} /> No clinical risk estimate</span></div>
+            <div className="section-heading"><div><p className="eyebrow">Selected saved observation</p><h2>Prediction and explainability</h2></div><span className="section-note"><Sparkles size={15} /> No clinical risk estimate</span></div>
             {savedScan ? <div className="model-output-grid">
               <SummaryCard label="Prediction" value={savedScan.prediction} note={`Eye: ${savedScan.eye_side}`} icon={<ScanLine size={19} />} />
               <SummaryCard label="AMD probability" value={formatProbability(savedScan.amd_probability)} note="Classifier output; not calibrated clinical risk" icon={<Sparkles size={19} />} />
               <SummaryCard label="Non-AMD probability" value={formatProbability(savedScan.class_probabilities?.['Non-AMD'])} note="Returned by the model endpoint" icon={<ShieldCheck size={19} />} />
               <SummaryCard label="Model version" value={savedScan.model_version || 'Not reported'} note={`Scan ID ${savedScan.scan_id}`} icon={<Microscope size={19} />} />
             </div> : <p className="empty-state">Select a saved scan below or upload an OCT image to display model output.</p>}
+            {gradcamError && <div className="info-box">{gradcamError}</div>}
+            {gradcamDataUrl && <div className="gradcam-panel"><img src={gradcamDataUrl} alt={`Grad-CAM visualization for saved scan ${savedScan?.scan_id || ''}`} /><div className="gradcam-caption">Grad-CAM is an explanation aid only; it does not establish disease location.</div></div>}
             <p className="data-caveat">Classifier probabilities are not a confirmed diagnosis or calibrated clinical risk. Scan history alone does not establish disease progression.</p>
+          </section>
+
+          <section className="panel comparison-panel">
+            <PanelHeader eyebrow="Same-patient saved records" title="Compare two OCT observations" />
+            <div className="comparison-controls">
+              {[0, 1].map((index) => (
+                <label key={index}>{index === 0 ? 'First scan' : 'Second scan'}
+                  <select
+                    value={comparisonScanIds[index]}
+                    onChange={(event) => onComparisonScanChange(index, event.target.value)}
+                    disabled={scans.length < 2}
+                  >
+                    <option value="">Select a saved scan</option>
+                    {scans.map((scan) => (
+                      <option key={scan.scan_id} value={scan.scan_id}>{scanLabel(scan)}</option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+              <button type="button" className="primary-action" onClick={onCompareScans} disabled={comparisonBusy || scans.length < 2}>
+                {comparisonBusy ? 'Loading scans…' : 'Compare scans'}
+              </button>
+            </div>
+            {scans.length < 2 && <p className="empty-state">At least two saved scans for this patient are needed for comparison.</p>}
+            {comparisonError && <div className="error-box" role="alert">{comparisonError}</div>}
+            {comparisonImages.length === 2 && (
+              <div className="scan-comparison-grid">
+                {comparisonImages.map(({ scanId, url }) => {
+                  const scan = scans.find((record) => record.scan_id === scanId && record.patient_id === patient.patient_id)
+                  if (!scan) return null
+                  return (
+                    <article className="scan-comparison-card" key={scanId}>
+                      <div className="comparison-image"><img src={url} alt={`Saved OCT scan ${scan.scan_id}`} /></div>
+                      <h3>{scan.prediction || 'Prediction unavailable'}</h3>
+                      <div className="comparison-facts">
+                        <div><span>Scan date</span><strong>{formatDate(scan.scan_date)}</strong></div>
+                        <div><span>Eye side</span><strong>{scan.eye_side || 'Not provided'}</strong></div>
+                        <div><span>AMD probability</span><strong>{formatProbability(scan.class_probabilities?.AMD ?? scan.amd_probability)}</strong></div>
+                        <div><span>Non-AMD probability</span><strong>{formatProbability(scan.class_probabilities?.['Non-AMD'])}</strong></div>
+                        <div><span>Model version</span><strong>{scan.model_version || 'Not reported'}</strong></div>
+                      </div>
+                    </article>
+                  )
+                })}
+              </div>
+            )}
+            <p className="data-caveat">This side-by-side view shows stored image and model-output differences only. It does not demonstrate clinically validated disease progression or treatment response.</p>
           </section>
         </div>
 
@@ -1025,6 +1460,7 @@ function PatientWorkspace({
 
           <section className="panel history-panel">
             <PanelHeader eyebrow="Patient-specific records" title="Scan history" action={`${scans.length} scans`} />
+            <p className="timeline-caption">Chronological: recorded scan date when available; upload time otherwise.</p>
             {historyBusy ? <p className="empty-state">Loading saved scan history…</p>
               : historyError ? <div className="error-box" role="alert">{historyError}</div>
                 : scans.length === 0 ? <p className="empty-state">No saved scans for this patient yet.</p>
@@ -1032,8 +1468,8 @@ function PatientWorkspace({
                     {scans.map((scan) => (
                       <article className={`scan-history-item ${savedScan?.scan_id === scan.scan_id ? 'scan-history-item-active' : ''}`} key={scan.scan_id}>
                         <div className="scan-history-summary">
-                          <div><strong>{scan.prediction} <span>· {scan.eye_side} eye</span></strong><small>Scan date: {formatDate(scan.scan_date)} · Uploaded: {formatDate(scan.uploaded_at)}</small><small>AMD probability: {formatProbability(scan.amd_probability)}</small></div>
-                          <button type="button" onClick={() => onSelectSavedScan(scan)} disabled={!scan.image_available}>{scan.image_available ? 'View scan' : 'Image unavailable'}</button>
+                          <div><strong>{scan.prediction || 'Prediction unavailable'} <span>· {scan.eye_side || 'Eye side unavailable'}</span></strong><small>Scan date: {formatDate(scan.scan_date)} · Uploaded: {formatDate(scan.uploaded_at)}</small><small>AMD probability: {formatProbability(scan.class_probabilities?.AMD ?? scan.amd_probability)}</small></div>
+                          <button type="button" onClick={() => onSelectSavedScan(scan)} disabled={!scan.image_available}>{scan.image_available ? 'Inspect saved scan' : 'Image unavailable'}</button>
                         </div>
                       </article>
                     ))}

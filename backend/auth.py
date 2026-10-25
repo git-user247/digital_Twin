@@ -10,6 +10,8 @@ import time
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from backend.audit import write_audit_event
+
 PASSWORD_HASH_ITERATIONS = 600_000
 PASSWORD_HASH_PREFIX = "pbkdf2_sha256"
 TOKEN_TTL_SECONDS = 3600
@@ -175,5 +177,10 @@ def require_doctor_auth(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> str:
     if credentials is None or credentials.scheme.casefold() != "bearer":
+        write_audit_event("authorization_failed", "failure")
         raise _invalid_token()
-    return verify_access_token(credentials.credentials)
+    try:
+        return verify_access_token(credentials.credentials)
+    except HTTPException:
+        write_audit_event("authorization_failed", "failure")
+        raise
