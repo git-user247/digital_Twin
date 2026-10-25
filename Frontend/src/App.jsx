@@ -542,13 +542,38 @@ function SavedScanSummary({ scan }) {
       <div className="result-symbol"><ScanLine size={22} /></div>
       <div className="result-copy">
         <span>Backend-confirmed saved visit</span>
-        <strong>{scan.prediction} <i>· AMD probability {formatProbability(scan.amd_probability)}</i></strong>
+        <strong>{scan.prediction}</strong>
+        <div className="probability-comparison">
+          {[
+            { label: 'AMD', value: scan.class_probabilities?.AMD },
+            { label: 'Non-AMD', value: scan.class_probabilities?.['Non-AMD'] },
+          ].map(({ label, value }) => (
+            <div className="probability-item" key={label}>
+              <div className="probability-label"><span>{label}</span><b>{formatProbability(value)}</b></div>
+              <div
+                className="probability-track"
+                role="progressbar"
+                aria-label={`${label} model-generated probability`}
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow={probabilityWidth(value)}
+              >
+                <div className={`probability-fill probability-fill-${label.toLowerCase()}`} style={{ width: `${probabilityWidth(value)}%` }} />
+              </div>
+            </div>
+          ))}
+        </div>
+        <small className="probability-note">These are model-generated probabilities, not a confirmed diagnosis or calibrated clinical risk.</small>
         <small>Scan ID: {scan.scan_id}</small>
         <small>Scan date: {formatDate(scan.scan_date)} · Uploaded: {formatDate(scan.uploaded_at)}</small>
-        <small>Non-AMD {formatProbability(scan.class_probabilities?.['Non-AMD'])} · AMD {formatProbability(scan.class_probabilities?.AMD)}</small>
       </div>
     </div>
   )
+}
+
+function probabilityWidth(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0
+  return Math.min(100, Math.max(0, value * 100))
 }
 
 function formatProbability(value) {

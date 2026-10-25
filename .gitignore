@@ -1,0 +1,36 @@
+# Local patient records
+/data/patients/
+
+# Python environments, caches, and coverage output
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Frontend dependencies and generated builds
+**/node_modules/
+/Frontend/dist/
+/dist/
+
+# Local secrets; keep example templates trackable
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# Temporary and operating-system files
+*.tmp
+*.temp
+*.swp
+*.swo
+~$*
+.DS_Store
+Thumbs.db

@@ -210,6 +210,40 @@ h1 em, .project-intro em { color: #647dcc; font-style: normal; }
 .optional-label { color: #9da9b8; font-weight: 400; }
 .saved-scan-result { align-items: flex-start; }
 .saved-scan-result .result-copy small { overflow-wrap: anywhere; }
+.saved-scan-result .probability-comparison {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+.saved-scan-result .probability-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: #667b95;
+  font-size: 10px;
+}
+.saved-scan-result .probability-label span { font-weight: 600; }
+.saved-scan-result .probability-label b { color: #344d91; font-size: 10px; }
+.saved-scan-result .probability-track {
+  height: 7px;
+  margin-top: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dfe7f5;
+}
+.saved-scan-result .probability-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: #5578d8;
+  transition: width 180ms ease;
+}
+.saved-scan-result .probability-fill-non-amd { background: #8ca2ce; }
+.saved-scan-result .probability-note {
+  margin-top: 9px;
+  color: #6f8199;
+  line-height: 1.45;
+}
 .info-box {
   margin-top: 12px;
   padding: 10px 12px;
