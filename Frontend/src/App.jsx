@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
   ArrowUpRight,
+  Activity,
   CalendarDays,
   ChevronRight,
   CircleHelp,
@@ -10,6 +11,7 @@ import {
   Eye,
   EyeOff,
   FileImage,
+  Info,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -23,7 +25,22 @@ import {
   Users,
   X,
 } from 'lucide-react'
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
 import { buildDashboardSummary, classifyPrediction } from './dashboardData.js'
+import {
+  buildLongitudinalData,
+  getModelProbability,
+  getObservationEye,
+  parseObservationDate,
+} from './longitudinalData.js'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/+$/, '')
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024
@@ -61,7 +78,7 @@ function latestSavedScan(records) {
 }
 
 function scanLabel(scan) {
-  const date = scan.scan_date ? formatDate(scan.scan_date) : `Uploaded ${formatDate(scan.uploaded_at)}`
+  const date = scan.scan_date ? formatDate(scan.scan_date) : 'Date unavailable'
   return `${date} · ${scan.eye_side || 'Eye side unavailable'} · ${scan.prediction || 'Prediction unavailable'}`
 }
 
@@ -612,6 +629,28 @@ function App() {
     return response.blob()
   }
 
+  const fetchSavedScanGradcam = async (imageBlob) => {
+    try {
+      const formData = new FormData()
+      const extension = imageBlob.type === 'image/png' ? 'png' : 'jpg'
+      formData.append('file', imageBlob, `saved-scan.${extension}`)
+      const response = await protectedFetch(`${API_BASE}/gradcam`, {
+        method: 'POST',
+        body: formData,
+      })
+      const explanation = await readResponse(response, 'Grad-CAM is unavailable for this saved scan.')
+      if (!explanation.gradcam_base64) {
+        return { dataUrl: '', error: 'Grad-CAM response did not include an image.' }
+      }
+      return { dataUrl: `data:image/png;base64,${explanation.gradcam_base64}`, error: '' }
+    } catch (requestError) {
+      if (/session has expired|sign in to the doctor demo/i.test(requestError.message || '')) {
+        throw requestError
+      }
+      return { dataUrl: '', error: requestError.message || 'Grad-CAM is unavailable for this saved scan.' }
+    }
+  }
+
   const selectSavedScan = async (scan, ownerPatientId = patient?.patient_id, records = scans) => {
     const storedScan = records.find((record) => record.scan_id === scan.scan_id)
     if (
@@ -635,19 +674,9 @@ function App() {
       return
     }
     try {
-      const formData = new FormData()
-      const extension = imageBlob.type === 'image/jpeg' ? 'jpg' : 'png'
-      formData.append('file', imageBlob, `scan-${storedScan.scan_id}.${extension}`)
-      const response = await protectedFetch(`${API_BASE}/gradcam`, {
-        method: 'POST',
-        body: formData,
-      })
-      const explanation = await readResponse(response, 'Grad-CAM is unavailable for this saved scan.')
-      if (explanation.gradcam_base64) {
-        setGradcamDataUrl(`data:image/png;base64,${explanation.gradcam_base64}`)
-      } else {
-        setGradcamError('Grad-CAM response did not include an image.')
-      }
+      const explanation = await fetchSavedScanGradcam(imageBlob)
+      setGradcamDataUrl(explanation.dataUrl)
+      setGradcamError(explanation.error)
     } catch (requestError) {
       setGradcamError(requestError.message || 'Grad-CAM is unavailable for this saved scan.')
     }
@@ -691,9 +720,13 @@ function App() {
         fetchStoredScanImage(patient.patient_id, first),
         fetchStoredScanImage(patient.patient_id, second),
       ])
+      const [firstGradcam, secondGradcam] = await Promise.all([
+        fetchSavedScanGradcam(firstBlob),
+        fetchSavedScanGradcam(secondBlob),
+      ])
       setComparisonImages([
-        { scanId: first.scan_id, url: URL.createObjectURL(firstBlob) },
-        { scanId: second.scan_id, url: URL.createObjectURL(secondBlob) },
+        { scanId: first.scan_id, url: URL.createObjectURL(firstBlob), gradcam: firstGradcam },
+        { scanId: second.scan_id, url: URL.createObjectURL(secondBlob), gradcam: secondGradcam },
       ])
     } catch (requestError) {
       setComparisonError(requestError.message || 'Unable to load the selected saved scans.')
@@ -1339,6 +1372,19 @@ function PatientWorkspace({
             )}
       </section>
 
+      <ProgressTracking
+        scans={scans}
+        historyBusy={historyBusy}
+        historyError={historyError}
+        patientId={patient.patient_id}
+        comparisonScanIds={comparisonScanIds}
+        onComparisonScanChange={onComparisonScanChange}
+        comparisonImages={comparisonImages}
+        comparisonBusy={comparisonBusy}
+        comparisonError={comparisonError}
+        onCompareScans={onCompareScans}
+      />
+
       <section className="workspace-content-grid">
         <div className="workspace-main-column">
           <div className="panel upload-panel" id="scan-upload">
@@ -1396,52 +1442,6 @@ function PatientWorkspace({
             <p className="data-caveat">Classifier probabilities are not a confirmed diagnosis or calibrated clinical risk. Scan history alone does not establish disease progression.</p>
           </section>
 
-          <section className="panel comparison-panel">
-            <PanelHeader eyebrow="Same-patient saved records" title="Compare two OCT observations" />
-            <div className="comparison-controls">
-              {[0, 1].map((index) => (
-                <label key={index}>{index === 0 ? 'First scan' : 'Second scan'}
-                  <select
-                    value={comparisonScanIds[index]}
-                    onChange={(event) => onComparisonScanChange(index, event.target.value)}
-                    disabled={scans.length < 2}
-                  >
-                    <option value="">Select a saved scan</option>
-                    {scans.map((scan) => (
-                      <option key={scan.scan_id} value={scan.scan_id}>{scanLabel(scan)}</option>
-                    ))}
-                  </select>
-                </label>
-              ))}
-              <button type="button" className="primary-action" onClick={onCompareScans} disabled={comparisonBusy || scans.length < 2}>
-                {comparisonBusy ? 'Loading scans…' : 'Compare scans'}
-              </button>
-            </div>
-            {scans.length < 2 && <p className="empty-state">At least two saved scans for this patient are needed for comparison.</p>}
-            {comparisonError && <div className="error-box" role="alert">{comparisonError}</div>}
-            {comparisonImages.length === 2 && (
-              <div className="scan-comparison-grid">
-                {comparisonImages.map(({ scanId, url }) => {
-                  const scan = scans.find((record) => record.scan_id === scanId && record.patient_id === patient.patient_id)
-                  if (!scan) return null
-                  return (
-                    <article className="scan-comparison-card" key={scanId}>
-                      <div className="comparison-image"><img src={url} alt={`Saved OCT scan ${scan.scan_id}`} /></div>
-                      <h3>{scan.prediction || 'Prediction unavailable'}</h3>
-                      <div className="comparison-facts">
-                        <div><span>Scan date</span><strong>{formatDate(scan.scan_date)}</strong></div>
-                        <div><span>Eye side</span><strong>{scan.eye_side || 'Not provided'}</strong></div>
-                        <div><span>AMD probability</span><strong>{formatProbability(scan.class_probabilities?.AMD ?? scan.amd_probability)}</strong></div>
-                        <div><span>Non-AMD probability</span><strong>{formatProbability(scan.class_probabilities?.['Non-AMD'])}</strong></div>
-                        <div><span>Model version</span><strong>{scan.model_version || 'Not reported'}</strong></div>
-                      </div>
-                    </article>
-                  )
-                })}
-              </div>
-            )}
-            <p className="data-caveat">This side-by-side view shows stored image and model-output differences only. It does not demonstrate clinically validated disease progression or treatment response.</p>
-          </section>
         </div>
 
         <aside className="workspace-side-column">
@@ -1460,7 +1460,7 @@ function PatientWorkspace({
 
           <section className="panel history-panel">
             <PanelHeader eyebrow="Patient-specific records" title="Scan history" action={`${scans.length} scans`} />
-            <p className="timeline-caption">Chronological: recorded scan date when available; upload time otherwise.</p>
+            <p className="timeline-caption">Chronology uses recorded scan dates only. Upload timestamps are not used as scan dates.</p>
             {historyBusy ? <p className="empty-state">Loading saved scan history…</p>
               : historyError ? <div className="error-box" role="alert">{historyError}</div>
                 : scans.length === 0 ? <p className="empty-state">No saved scans for this patient yet.</p>
@@ -1488,6 +1488,264 @@ function PatientWorkspace({
       </section>
     </>
   )
+}
+
+function ProgressTracking({
+  scans,
+  historyBusy,
+  historyError,
+  patientId,
+  comparisonScanIds,
+  onComparisonScanChange,
+  comparisonImages,
+  comparisonBusy,
+  comparisonError,
+  onCompareScans,
+}) {
+  const [eyeFilter, setEyeFilter] = useState('all')
+  const longitudinal = useMemo(
+    () => buildLongitudinalData(scans, eyeFilter),
+    [scans, eyeFilter],
+  )
+  const hasChartValues = longitudinal.chartData.some((point) => (
+    longitudinal.seriesGroups.some((group) => point[group.key] !== null)
+  ))
+  const chartEyes = eyeFilter === 'all'
+    ? ['left', 'right', 'unknown'].filter((eye) => longitudinal.chartData.some((point) => point.eye === eye))
+    : [eyeFilter]
+  const chartPanels = chartEyes.map((eye) => {
+    const data = longitudinal.chartData.filter((point) => point.eye === eye)
+    const groups = longitudinal.seriesGroups.filter((group) => group.eye === eye)
+    return {
+      eye,
+      data,
+      groups,
+      hasValues: data.some((point) => groups.some((group) => point[group.key] !== null)),
+    }
+  })
+  const availableEyes = [...new Set(scans.map(getObservationEye))]
+  const datedVersions = scans
+    .filter((scan) => parseObservationDate(scan.scan_date))
+    .map((scan) => (typeof scan.model_version === 'string' ? scan.model_version.trim() : ''))
+  const knownVersions = [...new Set(datedVersions.filter(Boolean))]
+  const missingVersionCount = datedVersions.filter((version) => !version).length
+  const hasVersionCaveat = knownVersions.length > 1 || missingVersionCount > 0
+
+  return (
+    <section className="panel longitudinal-panel" id="progress-tracking">
+      <PanelHeader eyebrow="Saved observation review" title="Longitudinal observation overview" action={`${scans.length} saved observations`} />
+      <p className="longitudinal-intro">This view organizes recorded OCT observations over time. It summarizes saved model outputs and does not assess disease progression.</p>
+
+      {historyBusy ? <p className="empty-state">Loading saved scan history…</p>
+        : historyError ? <div className="error-box" role="alert">{historyError}</div>
+          : scans.length === 0 ? <p className="empty-state">No OCT scans recorded for this patient.</p>
+            : (
+              <>
+                <div className="longitudinal-chart-heading">
+                  <div><h3><Activity size={17} /> Stored AMD probability by recorded scan date</h3><p>Values are saved classifier outputs, shown separately by eye and model version.</p></div>
+                  <label>Eye
+                    <select value={eyeFilter} onChange={(event) => setEyeFilter(event.target.value)}>
+                      <option value="all">All eye sides</option>
+                      {availableEyes.includes('left') && <option value="left">Left eye</option>}
+                      {availableEyes.includes('right') && <option value="right">Right eye</option>}
+                      {availableEyes.includes('unknown') && <option value="unknown">Eye side unavailable</option>}
+                    </select>
+                  </label>
+                </div>
+                {longitudinal.chartData.length > 0 && hasChartValues ? (
+                  <>
+                    <div className="longitudinal-chart-panels">
+                      {chartPanels.map(({ eye, data, groups, hasValues: panelHasValues }) => (
+                        <article className="longitudinal-chart-panel" key={eye}>
+                          <h4>{eye === 'unknown' ? 'Eye side unavailable · isolated observations' : `${eye} eye`}</h4>
+                          {panelHasValues ? (
+                            <div className="longitudinal-chart" role="img" aria-label={`${eye} eye AMD probability by recorded scan date, separated by model version`}>
+                              <ResponsiveContainer width="100%" height="100%">
+                                <LineChart data={data} margin={{ top: 8, right: 12, left: 4, bottom: 12 }}>
+                                  <CartesianGrid stroke="#e9eef5" strokeDasharray="3 3" />
+                                  <XAxis dataKey="axisLabel" tick={{ fill: '#8290a2', fontSize: 10 }} minTickGap={24} />
+                                  <YAxis domain={[0, 1]} tickFormatter={(value) => `${Math.round(value * 100)}%`} tick={{ fill: '#8290a2', fontSize: 10 }} width={48} />
+                                  <Tooltip content={<LongitudinalTooltip />} />
+                                  {groups.map((group) => (
+                                    <Line
+                                      key={group.key}
+                                      type="linear"
+                                      dataKey={group.key}
+                                      name={`${group.eye === 'unknown' ? 'Eye unavailable' : `${group.eye} eye`} · ${group.modelVersion || 'model version unavailable'}`}
+                                      stroke={group.isolated ? 'transparent' : group.eye === 'left' ? '#5875ba' : '#24a58d'}
+                                      strokeDasharray={group.eye === 'right' ? '5 4' : undefined}
+                                      strokeWidth={2}
+                                      dot={{ r: 4, fill: group.eye === 'unknown' ? '#8a98aa' : group.eye === 'left' ? '#5875ba' : '#24a58d' }}
+                                      activeDot={{ r: 6 }}
+                                      connectNulls={false}
+                                      isAnimationActive={false}
+                                    />
+                                  ))}
+                                </LineChart>
+                              </ResponsiveContainer>
+                            </div>
+                          ) : <p className="empty-state">No valid saved AMD probabilities are available for this eye.</p>}
+                        </article>
+                      ))}
+                    </div>
+                    <div className="longitudinal-chart-key">
+                      {longitudinal.seriesGroups.map((group) => (
+                        <span key={group.key}><i className={`trend-key-${group.eye}`} />{group.eye === 'unknown' ? 'Eye unavailable' : `${group.eye} eye`} · {group.modelVersion || 'model version unavailable'}</span>
+                      ))}
+                    </div>
+                  </>
+                ) : <p className="empty-state">
+                  {longitudinal.chartData.length
+                    ? 'Recorded dates are available, but no valid saved AMD probabilities can be charted.'
+                    : 'No valid recorded scan dates are available for the chart. Upload timestamps are not substituted.'}
+                </p>}
+
+                {hasVersionCaveat && (
+                  <p className="info-box longitudinal-warning" role="note">
+                    <Info size={16} /> {knownVersions.length > 1 ? 'Multiple model versions are present.' : ''}
+                    {knownVersions.length > 1 && missingVersionCount > 0 ? ' ' : ''}
+                    {missingVersionCount > 0 ? `${missingVersionCount} dated observation(s) have no model version.` : ''}
+                    {' '}Outputs from different or unknown model versions may not be directly comparable; chart lines are kept separate.
+                  </p>
+                )}
+
+                <div className="longitudinal-subsection">
+                  <h3>Prediction changes between dated observations</h3>
+                  <p>Only adjacent dated observations for the same known eye and the same reported model version are numerically compared.</p>
+                  {longitudinal.comparisons.length === 0 ? <p className="empty-state">No same-eye, dated observation pairs are available.</p>
+                    : <div className="prediction-change-list">
+                      {longitudinal.comparisons.map((comparison) => (
+                        <article className="prediction-change-item" key={`${comparison.previous.scan_id}-${comparison.current.scan_id}`}>
+                          <div className="prediction-change-heading">
+                            <strong>{comparison.eye} eye · {comparison.previous.scan_date} → {comparison.current.scan_date}</strong>
+                            <span>{comparison.previous.scan_id || 'ID unavailable'} → {comparison.current.scan_id || 'ID unavailable'}</span>
+                          </div>
+                          {comparison.comparable ? (
+                            <div className="prediction-change-values">
+                              <span>Saved class: {comparison.previous.prediction || 'Not available'} → {comparison.current.prediction || 'Not available'}{comparison.predictionChanged ? ' (changed)' : ''}</span>
+                              <span>AMD probability: {formatPercentagePointChange(comparison.amdChangePp)}</span>
+                              <span>Non-AMD probability: {formatPercentagePointChange(comparison.nonAmdChangePp)}</span>
+                              <small>Numerical model-output differences only; not a progression measure.</small>
+                            </div>
+                          ) : <p className="comparison-not-available">Not compared: {comparison.reason}.</p>}
+                        </article>
+                      ))}
+                    </div>}
+                </div>
+
+                <div className="longitudinal-subsection">
+                  <h3>Chronological saved observations</h3>
+                  <p>{longitudinal.undatedCount > 0 ? `${longitudinal.undatedCount} observation(s) lack a valid recorded date and are listed separately.` : 'Ordered by valid recorded scan date.'}</p>
+                  <div className="observation-table-wrap">
+                    <table className="observation-table">
+                      <thead><tr><th>Recorded date</th><th>Scan ID</th><th>Eye</th><th>Saved class</th><th>AMD</th><th>Non-AMD</th><th>Model</th></tr></thead>
+                      <tbody>
+                        {longitudinal.orderedScans.map((scan) => {
+                          const validDate = parseObservationDate(scan.scan_date)
+                          return (
+                            <tr key={scan.scan_id || `${scan.scan_date}-${scan.uploaded_at}`}>
+                              <td>{validDate || 'Date unavailable'}</td>
+                              <td>{scan.scan_id || 'Not available'}</td>
+                              <td>{getObservationEye(scan) === 'unknown' ? 'Not available' : getObservationEye(scan)}</td>
+                              <td>{scan.prediction || 'Not available'}</td>
+                              <td>{formatProbability(getModelProbability(scan, 'AMD'))}</td>
+                              <td>{formatProbability(getModelProbability(scan, 'Non-AMD'))}</td>
+                              <td>{scan.model_version || 'Not available'}</td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </>
+            )}
+
+      <div className="interpretation-note">
+        <h3><Info size={17} /> How to interpret this display</h3>
+        <ul>
+          <li>These entries are model-generated classifications and probabilities tied to saved OCT records, not independently verified clinical findings.</li>
+          <li>Left, right, and unknown-eye observations are not combined. Only valid recorded scan dates are used for ordering and charting; upload time is not treated as acquisition time.</li>
+          <li>Percentage-point differences compare stored classifier outputs only when adjacent dated observations have the same known eye and model version.</li>
+          <li>Side-by-side images are not image-registered and do not provide anatomical measurements, lesion annotations, or evidence of structural change.</li>
+        </ul>
+      </div>
+
+      <section className="comparison-panel longitudinal-comparison">
+        <PanelHeader eyebrow="Same-patient saved records" title="Compare two OCT observations" />
+        <div className="comparison-controls">
+          {[0, 1].map((index) => (
+            <label key={index}>{index === 0 ? 'First scan' : 'Second scan'}
+              <select
+                value={comparisonScanIds[index]}
+                onChange={(event) => onComparisonScanChange(index, event.target.value)}
+                disabled={scans.length < 2}
+              >
+                <option value="">Select a saved scan</option>
+                {scans.map((scan) => (
+                  <option key={scan.scan_id} value={scan.scan_id}>{scanLabel(scan)}</option>
+                ))}
+              </select>
+            </label>
+          ))}
+          <button type="button" className="primary-action" onClick={onCompareScans} disabled={comparisonBusy || scans.length < 2}>
+            {comparisonBusy ? 'Loading scans and explanations…' : 'Compare scans'}
+          </button>
+        </div>
+        {scans.length < 2 && <p className="empty-state">At least two saved scans for this patient are needed for comparison.</p>}
+        {comparisonError && <div className="error-box" role="alert">{comparisonError}</div>}
+        {comparisonImages.length === 2 && (
+          <div className="scan-comparison-grid">
+            {comparisonImages.map(({ scanId, url, gradcam }) => {
+              const scan = scans.find((record) => record.scan_id === scanId && record.patient_id === patientId)
+              if (!scan) return null
+              return (
+                <article className="scan-comparison-card" key={scanId}>
+                  <h3>{scan.prediction || 'Prediction unavailable'}</h3>
+                  <div className="comparison-facts">
+                    <div><span>Scan ID</span><strong>{scan.scan_id || 'Not available'}</strong></div>
+                    <div><span>Recorded date</span><strong>{parseObservationDate(scan.scan_date) || 'Not available'}</strong></div>
+                    <div><span>Eye side</span><strong>{scan.eye_side || 'Not available'}</strong></div>
+                    <div><span>AMD probability</span><strong>{formatProbability(getModelProbability(scan, 'AMD'))}</strong></div>
+                    <div><span>Non-AMD probability</span><strong>{formatProbability(getModelProbability(scan, 'Non-AMD'))}</strong></div>
+                    <div><span>Model version</span><strong>{scan.model_version || 'Not available'}</strong></div>
+                  </div>
+                  <div className="comparison-image"><img src={url} alt={`Saved OCT scan ${scan.scan_id}`} /></div>
+                  <div className="comparison-gradcam">
+                    <strong>Model-explanation visualization (Grad-CAM)</strong>
+                    {gradcam?.dataUrl
+                      ? <img src={gradcam.dataUrl} alt={`Grad-CAM explanation for scan ${scan.scan_id}`} />
+                      : <p className="empty-state">{gradcam?.error || 'Grad-CAM is unavailable for this scan.'}</p>}
+                  </div>
+                </article>
+              )
+            })}
+          </div>
+        )}
+        <p className="data-caveat">This comparison shows the two selected saved records only. Images are not aligned or anatomically measured; differences do not establish clinically validated disease progression or treatment response. Grad-CAM is a model-explanation visualization, not a verified lesion or clinical finding.</p>
+      </section>
+    </section>
+  )
+}
+
+function LongitudinalTooltip({ active, payload }) {
+  if (!active || !payload?.length) return null
+  const point = payload[0].payload
+  return (
+    <div className="longitudinal-tooltip">
+      <strong>{point.date}</strong>
+      <span>Scan ID: {point.scanId}</span>
+      <span>Eye: {point.eye === 'unknown' ? 'Not available' : point.eye}</span>
+      <span>Saved class: {point.prediction || 'Not available'}</span>
+      <span>AMD probability: {formatProbability(point.amdProbability)}</span>
+      <span>Model: {point.modelVersion || 'Not available'}</span>
+    </div>
+  )
+}
+
+function formatPercentagePointChange(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 'Not available'
+  return `${value > 0 ? '+' : ''}${value.toFixed(2)} percentage points`
 }
 
 function SummaryCard({ label, value, note, icon }) {
