@@ -36,10 +36,14 @@ import {
 } from 'recharts'
 import { buildDashboardSummary, classifyPrediction } from './dashboardData.js'
 import {
+  buildAmdProgressAssessment,
+  buildAmdProgressSummary,
   buildLongitudinalData,
+  buildOverallAmdTimeline,
   getModelProbability,
   getObservationEye,
   parseObservationDate,
+  STRUCTURAL_PROGRESS_STATUS,
 } from './longitudinalData.js'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/+$/, '')
@@ -134,6 +138,9 @@ function App() {
   const [latestImageError, setLatestImageError] = useState('')
   const [comparisonScanIds, setComparisonScanIds] = useState(['', ''])
   const [comparisonImages, setComparisonImages] = useState([])
+  const [assessmentImages, setAssessmentImages] = useState([])
+  const [assessmentImagesBusy, setAssessmentImagesBusy] = useState(false)
+  const [assessmentImagesError, setAssessmentImagesError] = useState('')
   const [comparisonBusy, setComparisonBusy] = useState(false)
   const [comparisonError, setComparisonError] = useState('')
   const [reportBusy, setReportBusy] = useState(false)
@@ -309,6 +316,12 @@ function App() {
   useEffect(() => () => {
     comparisonImages.forEach((entry) => URL.revokeObjectURL(entry.url))
   }, [comparisonImages])
+
+  useEffect(() => () => {
+    assessmentImages.forEach((entry) => {
+      if (entry.url) URL.revokeObjectURL(entry.url)
+    })
+  }, [assessmentImages])
 
   const loadPatientScans = async (id, token = authToken) => {
     setHistoryBusy(true)
@@ -711,6 +724,10 @@ function App() {
       setComparisonError('Both scans must belong to the currently selected patient.')
       return
     }
+    if (getObservationEye(first) === 'unknown' || getObservationEye(first) !== getObservationEye(second)) {
+      setComparisonError('Choose two scans from the same known eye for visual comparison.')
+      return
+    }
 
     setComparisonBusy(true)
     setComparisonError('')
@@ -732,6 +749,60 @@ function App() {
       setComparisonError(requestError.message || 'Unable to load the selected saved scans.')
     } finally {
       setComparisonBusy(false)
+    }
+  }
+
+  const loadAmdAssessmentImages = async (assessment) => {
+    if (!patientIsLoaded || !patient?.patient_id || assessment.status !== 'comparison') return
+    const selectedScans = [assessment.previous?.scan, assessment.latest?.scan]
+    const records = selectedScans.map((selectedScan) => scans.find((record) => (
+      record.scan_id === selectedScan?.scan_id
+      && record.patient_id === patient.patient_id
+      && selectedScan.patient_id === patient.patient_id
+    )))
+    if (records.some((record) => !record) || records[0].scan_id === records[1].scan_id) {
+      setAssessmentImagesError('The selected comparison scans could not be verified in this patient’s saved history.')
+      return
+    }
+
+    setAssessmentImagesBusy(true)
+    setAssessmentImagesError('')
+    setAssessmentImages([])
+    try {
+      const imageResults = await Promise.allSettled(
+        records.map((record) => fetchStoredScanImage(patient.patient_id, record)),
+      )
+      const imageEntries = await Promise.all(imageResults.map(async (imageResult, index) => {
+        const record = records[index]
+        if (imageResult.status === 'rejected') {
+          return {
+            scanId: record.scan_id,
+            patientId: patient.patient_id,
+            role: index === 0 ? 'previous' : 'latest',
+            url: '',
+            imageError: imageResult.reason?.message || 'Unable to retrieve this saved scan image.',
+            gradcam: { dataUrl: '', error: 'Grad-CAM is unavailable because the original scan image could not be retrieved.' },
+          }
+        }
+        const url = URL.createObjectURL(imageResult.value)
+        const gradcam = await fetchSavedScanGradcam(imageResult.value).then(
+          (result) => result,
+          (requestError) => ({ dataUrl: '', error: requestError.message || 'Grad-CAM is unavailable for this scan.' }),
+        )
+        return {
+          scanId: record.scan_id,
+          patientId: patient.patient_id,
+          role: index === 0 ? 'previous' : 'latest',
+          url,
+          imageError: '',
+          gradcam,
+        }
+      }))
+      setAssessmentImages(imageEntries)
+    } catch (requestError) {
+      setAssessmentImagesError(requestError.message || 'Unable to load the selected AMD assessment scans.')
+    } finally {
+      setAssessmentImagesBusy(false)
     }
   }
 
@@ -972,6 +1043,10 @@ function App() {
               comparisonBusy={comparisonBusy}
               comparisonError={comparisonError}
               onCompareScans={compareSelectedScans}
+              assessmentImages={assessmentImages}
+              assessmentImagesBusy={assessmentImagesBusy}
+              assessmentImagesError={assessmentImagesError}
+              onLoadAmdAssessmentImages={loadAmdAssessmentImages}
               reportBusy={reportBusy}
               reportError={reportError}
               onExportReport={exportRetinalTwinReport}
@@ -1294,6 +1369,10 @@ function PatientWorkspace({
   comparisonBusy,
   comparisonError,
   onCompareScans,
+  assessmentImages,
+  assessmentImagesBusy,
+  assessmentImagesError,
+  onLoadAmdAssessmentImages,
   reportBusy,
   reportError,
   onExportReport,
@@ -1371,6 +1450,18 @@ function PatientWorkspace({
               </div>
             )}
       </section>
+
+      <AmdProgressAssessment
+        patientId={patient.patient_id}
+        scans={scans}
+        historyBusy={historyBusy}
+        historyError={historyError}
+        images={assessmentImages}
+        imagesBusy={assessmentImagesBusy}
+        imagesError={assessmentImagesError}
+        onLoadImages={onLoadAmdAssessmentImages}
+        onSelectSavedScan={onSelectSavedScan}
+      />
 
       <ProgressTracking
         scans={scans}
@@ -1673,6 +1764,7 @@ function ProgressTracking({
 
       <section className="comparison-panel longitudinal-comparison">
         <PanelHeader eyebrow="Same-patient saved records" title="Compare two OCT observations" />
+        <p className="timeline-caption">Choose two different saved scans from the same known eye. Detailed image and Grad-CAM views compare those selected records only.</p>
         <div className="comparison-controls">
           {[0, 1].map((index) => (
             <label key={index}>{index === 0 ? 'First scan' : 'Second scan'}
@@ -1725,6 +1817,366 @@ function ProgressTracking({
         <p className="data-caveat">This comparison shows the two selected saved records only. Images are not aligned or anatomically measured; differences do not establish clinically validated disease progression or treatment response. Grad-CAM is a model-explanation visualization, not a verified lesion or clinical finding.</p>
       </section>
     </section>
+  )
+}
+
+function AmdProgressAssessment({
+  patientId,
+  scans,
+  historyBusy,
+  historyError,
+  images,
+  imagesBusy,
+  imagesError,
+  onLoadImages,
+  onSelectSavedScan,
+}) {
+  const patientScans = scans.filter((scan) => scan.patient_id === patientId)
+  const availableEyes = [...new Set(patientScans.map(getObservationEye).filter((eye) => eye !== 'unknown'))]
+  const [selectedEye, setSelectedEye] = useState('left')
+  const eye = availableEyes.includes(selectedEye) ? selectedEye : availableEyes[0] || 'left'
+  const assessment = useMemo(
+    () => buildAmdProgressAssessment(patientScans, patientId, eye),
+    [patientScans, patientId, eye],
+  )
+  const unrecordedDateCount = patientScans.filter((scan) => (
+    getObservationEye(scan) === eye && !parseObservationDate(scan.scan_date)
+  )).length
+  const latestProbabilityAvailable = assessment.latest?.probability !== null
+    && assessment.latest?.probability !== undefined
+  const previousProbabilityAvailable = assessment.previous?.probability !== null
+    && assessment.previous?.probability !== undefined
+  const modelWarning = assessment.modelVersionStatus === 'different'
+    ? 'The two scans report different model versions. The arithmetic difference is shown for reference, but outputs may not be directly equivalent.'
+    : assessment.modelVersionStatus === 'unavailable'
+      ? 'A model version is missing for at least one scan. Output comparability cannot be verified.'
+      : ''
+  const pairMatches = images.length === 2
+    && images[0].patientId === patientId
+    && images[1].patientId === patientId
+    && images[0].scanId === assessment.previous?.scan?.scan_id
+    && images[1].scanId === assessment.latest?.scan?.scan_id
+
+  return (
+    <>
+    <section className="panel amd-progress-assessment" id="amd-progress-assessment">
+      <PanelHeader eyebrow="Stored model output comparison" title="AMD Progress Assessment" action="Research observation only" />
+      <div className="assessment-eye-selector">
+        <label>Eye for assessment
+          <select
+            value={eye}
+            onChange={(event) => setSelectedEye(event.target.value)}
+            disabled={!availableEyes.length || historyBusy}
+          >
+            {availableEyes.length
+              ? availableEyes.map((availableEye) => <option key={availableEye} value={availableEye}>{availableEye === 'left' ? 'Left eye' : 'Right eye'}</option>)
+              : <option value="left">Left eye</option>}
+          </select>
+        </label>
+        {historyBusy && <span>Loading saved observations…</span>}
+      </div>
+
+      {historyError ? <div className="error-box" role="alert">{historyError}</div>
+        : assessment.status === 'no-observations' ? (
+          <p className="empty-state">No dated {eye}-eye scans are available. Scan history without a valid recorded date cannot be used to establish this comparison.</p>
+        ) : assessment.status === 'insufficient-history' ? (
+          <div className="assessment-insufficient">
+            <div><span>Latest eligible observation</span><strong>{assessment.latest.date}</strong><small>{assessment.latest.scan.scan_id} · AMD probability {formatProbability(assessment.latest.probability)}</small></div>
+            <p>Only one dated {eye}-eye scan is available. There is insufficient history for a scan-to-scan comparison.</p>
+          </div>
+        ) : (
+          <>
+            <div className="assessment-observation-cards">
+              <article>
+                <span>Previous observation · {eye} eye</span>
+                <strong>{assessment.previous.date}</strong>
+                <small>Scan ID: {assessment.previous.scan.scan_id || 'Not available'}</small>
+                <small>Prediction: {assessment.previous.scan.prediction || 'Not available'}</small>
+                <small>AMD model probability: {formatProbability(assessment.previous.probability)}</small>
+                <small>Model version: {assessment.previous.scan.model_version || 'Not available'}</small>
+              </article>
+              <article>
+                <span>Latest observation · {eye} eye</span>
+                <strong>{assessment.latest.date}</strong>
+                <small>Scan ID: {assessment.latest.scan.scan_id || 'Not available'}</small>
+                <small>Prediction: {assessment.latest.scan.prediction || 'Not available'}</small>
+                <small>AMD model probability: {formatProbability(assessment.latest.probability)}</small>
+                <small>Model version: {assessment.latest.scan.model_version || 'Not available'}</small>
+              </article>
+            </div>
+
+            <div className={`assessment-change assessment-change-${assessment.direction || 'unavailable'}`}>
+              <div><span>Change in AMD model probability</span><strong>{formatPercentagePointChange(assessment.changePp)}</strong></div>
+              <div><span>Direction</span><strong>{assessment.direction || 'Unavailable'}</strong></div>
+              <div><span>Elapsed recorded time</span><strong>{assessment.elapsedDays} {assessment.elapsedDays === 1 ? 'day' : 'days'}</strong></div>
+            </div>
+
+            <p className="assessment-summary" role="status">{buildAmdProgressSummary(assessment)}</p>
+
+            {unrecordedDateCount > 0 && (
+              <p className="info-box assessment-warning">
+                {unrecordedDateCount} {eye}-eye observation(s) without a valid recorded scan date were excluded; upload timestamps were not used as scan dates.
+              </p>
+            )}
+            {(!previousProbabilityAvailable || !latestProbabilityAvailable) && (
+              <p className="info-box assessment-warning">
+                At least one AMD probability is missing or outside the valid 0–1 range. No zero or substitute value is used.
+              </p>
+            )}
+            {modelWarning && <p className="info-box assessment-warning">{modelWarning}</p>}
+            <p className="info-box assessment-warning">
+              Per-scan preprocessing metadata is not stored, so preprocessing equivalence cannot be checked. Model probabilities are sigmoid classifier outputs; no probability-calibration step or metadata was found, so calibration has not been established.
+            </p>
+
+            <div className="assessment-scan-section">
+              <div className="assessment-scan-heading">
+                <div><h3>Actual OCT scan comparison</h3><p>Only the previous and latest eligible saved scans for the selected eye are shown.</p></div>
+                <button
+                  type="button"
+                  className="secondary-action"
+                  onClick={() => onLoadImages(assessment)}
+                  disabled={imagesBusy || historyBusy}
+                >
+                  {imagesBusy ? 'Loading scans and explanations…' : pairMatches ? 'Reload scan comparison' : 'Load scan comparison'}
+                </button>
+              </div>
+              {imagesError && <div className="error-box" role="alert">{imagesError}</div>}
+              <div className="assessment-image-grid">
+                {[assessment.previous, assessment.latest].map((observation, index) => {
+                  const role = index === 0 ? 'previous' : 'latest'
+                  const image = pairMatches ? images[index] : null
+                  return (
+                    <article className="assessment-image-card" key={observation.scan.scan_id}>
+                      <h4>{role === 'previous' ? 'Previous' : 'Latest'} · {observation.date}</h4>
+                      <div className="comparison-image">
+                        {image?.url
+                          ? <img src={image.url} alt={`${role} saved OCT scan ${observation.scan.scan_id}`} />
+                          : <p className="empty-state">{image?.imageError || 'Load the authenticated saved image for this observation.'}</p>}
+                      </div>
+                      <p className="assessment-scan-prediction">{observation.scan.prediction || 'Prediction not available'} · AMD probability {formatProbability(observation.probability)}</p>
+                      <div className="assessment-gradcam">
+                        <strong>Grad-CAM model attention visualization</strong>
+                        {image?.gradcam?.dataUrl
+                          ? <img src={image.gradcam.dataUrl} alt={`Grad-CAM model attention visualization for scan ${observation.scan.scan_id}`} />
+                          : <p className="empty-state">{image?.gradcam?.error || 'Grad-CAM has not been loaded for this observation.'}</p>}
+                        <small>Model attention visualization only; not a verified lesion or structural measurement.</small>
+                      </div>
+                    </article>
+                  )
+                })}
+              </div>
+              <p className="data-caveat">The images are displayed side by side without registration or anatomical measurement. Visual differences alone do not establish clinical progression.</p>
+            </div>
+          </>
+        )}
+      <div className="structural-progress-note">
+        <strong>{STRUCTURAL_PROGRESS_STATUS}</strong>
+        <p>No validated retinal segmentation or comparable structural biomarker measurement method is available in this project. Classification probabilities and Grad-CAM cannot establish retinal thickness, lesion area, drusen volume, atrophy, or anatomical progression.</p>
+      </div>
+      <p className="assessment-disclaimer">AMD probability change is a difference in saved model outputs, not a percentage of disease progression, confirmed change in disease severity, or evidence of retinal improvement. This experimental prototype does not provide a clinical diagnosis or treatment recommendation.</p>
+    </section>
+    <OverallAmdProgressTimeline
+      scans={patientScans}
+      patientId={patientId}
+      eye={eye}
+      historyBusy={historyBusy}
+      historyError={historyError}
+      onSelectSavedScan={onSelectSavedScan}
+    />
+    </>
+  )
+}
+
+function OverallAmdProgressTimeline({ scans, patientId, eye, historyBusy, historyError, onSelectSavedScan }) {
+  const timeline = useMemo(
+    () => buildOverallAmdTimeline(scans, patientId, eye),
+    [scans, patientId, eye],
+  )
+  const hasProbabilityPoints = timeline.rows.some((row) => row.probability !== null)
+  const hasVersionDifferences = timeline.rows.some((row) => (
+    row.modelVersionStatus === 'different' || row.modelVersionStatus === 'unavailable'
+  ))
+  const modelSummaryWarning = timeline.first
+    && timeline.latest
+    && timeline.first.scan.scan_id !== timeline.latest.scan.scan_id
+    && (
+      !timeline.first.modelVersion
+      || !timeline.latest.modelVersion
+      || timeline.first.modelVersion !== timeline.latest.modelVersion
+    )
+
+  return (
+    <section className="panel overall-amd-timeline" id="overall-amd-progress-timeline">
+      <PanelHeader eyebrow="Complete recorded history" title="Overall AMD Progress Timeline" action={`${timeline.observationCount} eligible observations`} />
+      <p className="timeline-intro">Every dated saved observation for {eye} eye is listed and graphed below. Only recorded scan dates are used; upload timestamps are shown as upload metadata and are not treated as scan times.</p>
+
+      {historyBusy ? <p className="empty-state">Loading all saved patient observations…</p>
+        : historyError ? <div className="error-box" role="alert">{historyError}</div>
+        : timeline.observationCount === 0 ? (
+          <div className="timeline-empty">
+            <p className="empty-state">No eligible dated {eye}-eye observations are available for the overall timeline.</p>
+            {timeline.excludedUndatedCount > 0 && <p>{timeline.excludedUndatedCount} observation(s) were excluded because a valid recorded scan date is unavailable.</p>}
+          </div>
+        ) : (
+          <>
+            <div className="overall-timeline-summary-grid">
+              <div><span>Recorded observations</span><strong>{timeline.observationCount}</strong></div>
+              <div><span>Distinct observation dates</span><strong>{timeline.distinctDateCount}</strong></div>
+              <div><span>Earliest AMD probability</span><strong>{formatProbability(timeline.first.probability)}</strong><small>{timeline.first.date} · {timeline.first.shortScanId}</small></div>
+              <div><span>Latest AMD probability</span><strong>{formatProbability(timeline.latest.probability)}</strong><small>{timeline.latest.date} · {timeline.latest.shortScanId}</small></div>
+              <div><span>Earliest-to-latest difference</span><strong>{formatPercentagePointChange(timeline.overallChangePp)}</strong><small>{timeline.overallDirection || 'Unavailable'}</small></div>
+              <div><span>Elapsed recorded time</span><strong>{timeline.elapsedDays === null ? 'Not available' : `${timeline.elapsedDays} ${timeline.elapsedDays === 1 ? 'day' : 'days'}`}</strong><small>{timeline.distinctDateCount > 1 ? 'Across distinct recorded dates' : 'Same recorded date; not a long-term interval'}</small></div>
+            </div>
+
+            <p className="assessment-summary overall-timeline-wording">
+              {timeline.observationCount < 2
+                ? 'Only one eligible observation is recorded. A change over time cannot yet be calculated.'
+                : timeline.distinctDateCount < 2
+                  ? timeline.overallChangePp === null
+                    ? 'Multiple observations share one recorded date, but one or more endpoint probabilities are unavailable; an overall difference cannot be calculated.'
+                    : `The recorded observations share one date. The earliest-to-latest model-output difference is ${formatPercentagePointChange(timeline.overallChangePp)} over 0 days; this is a same-day output difference, not a long-term trend.`
+                  : timeline.overallChangePp === null
+                    ? 'The earliest-to-latest model-output difference is unavailable because an endpoint AMD probability is missing or invalid.'
+                    : `The model's AMD prediction probability ${timeline.overallDirection} from ${formatProbability(timeline.first.probability)} to ${formatProbability(timeline.latest.probability)}, a change of ${Math.abs(timeline.overallChangePp).toFixed(2)} percentage points across ${timeline.elapsedDays} ${timeline.elapsedDays === 1 ? 'day' : 'days'}. This describes stored model outputs and does not independently establish AMD progression, retinal improvement, disease severity, or treatment response.`}
+            </p>
+
+            {timeline.excludedUndatedCount > 0 && (
+              <p className="info-box assessment-warning">
+                {timeline.excludedUndatedCount} {eye}-eye scan(s) with missing or invalid recorded dates are excluded from chronological graph and summary calculations.
+              </p>
+            )}
+            {hasVersionDifferences && (
+              <p className="info-box assessment-warning">
+                Model versions differ or are missing among consecutive observations. The chart uses separate series for reported versions; table differences across unknown or different versions are marked potentially non-comparable.
+              </p>
+            )}
+            {modelSummaryWarning && (
+              <p className="info-box assessment-warning">
+                The earliest and latest observations have different or missing model-version metadata. Their endpoint arithmetic difference is shown for reference and may not be directly comparable.
+              </p>
+            )}
+            {timeline.rows.some((row) => row.probability === null) && (
+              <p className="info-box assessment-warning">
+                One or more observations have missing or invalid AMD probabilities. They remain in the history table but are not plotted as numeric points.
+              </p>
+            )}
+            {timeline.distinctDateCount < 2 && timeline.observationCount > 1 && (
+              <p className="info-box assessment-warning">
+                Multiple observations have the same recorded date. Their markers and rows are retained separately; no distinct-day interval can be inferred.
+              </p>
+            )}
+
+            <div className="overall-timeline-chart-section">
+              <div><h3>Full-history AMD model probability</h3><p>{timeline.observationCount === 1 ? 'One saved point is shown; a trend cannot yet be established.' : 'All eligible dated observations are plotted in chronological order; model versions are visually separated.'}</p></div>
+              {hasProbabilityPoints ? (
+                <div className="overall-timeline-chart" role="img" aria-label={`AMD model probability for all ${timeline.observationCount} eligible ${eye}-eye observations`}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={timeline.chartData} margin={{ top: 12, right: 24, left: 6, bottom: 22 }}>
+                      <CartesianGrid stroke="#e9eef5" strokeDasharray="3 3" />
+                      <XAxis
+                        type="number"
+                        dataKey="axisTimestamp"
+                        domain={['dataMin', 'dataMax']}
+                        tickFormatter={formatTimelineAxisDate}
+                        tick={{ fill: '#8290a2', fontSize: 10 }}
+                        minTickGap={22}
+                        label={{ value: 'Recorded scan date (time is not stored)', position: 'insideBottom', offset: -12, fill: '#8290a2', fontSize: 10 }}
+                      />
+                      <YAxis domain={[0, 1]} tickFormatter={(value) => `${Math.round(value * 100)}%`} tick={{ fill: '#8290a2', fontSize: 10 }} width={48} />
+                      <Tooltip content={<OverallTimelineTooltip />} />
+                      {timeline.groups.map((group, index) => (
+                        <Line
+                          key={group.key}
+                          type="linear"
+                          dataKey={group.key}
+                          name={group.modelVersion || 'Model version unavailable (isolated)'}
+                          stroke={timelineSeriesColor(index)}
+                          strokeDasharray={group.isolated ? '3 3' : undefined}
+                          strokeWidth={2}
+                          dot={<OverallTimelineDot color={timelineSeriesColor(index)} />}
+                          activeDot={{ r: 7 }}
+                          connectNulls={false}
+                          isAnimationActive={false}
+                        />
+                      ))}
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : <p className="empty-state">No valid saved AMD probabilities can be plotted; observations remain listed below.</p>}
+              <div className="longitudinal-chart-key">
+                {timeline.groups.map((group, index) => (
+                  <span key={group.key}><i style={{ backgroundColor: timelineSeriesColor(index) }} />{group.modelVersion || 'Model version unavailable (isolated)'}</span>
+                ))}
+              </div>
+              <p className="same-date-marker-note">Markers from observations sharing a date are offset slightly horizontally only to make individual points visible; their recorded dates are unchanged. Exact scan identifiers and probabilities are in the tooltip and table.</p>
+            </div>
+
+            <div className="longitudinal-subsection">
+              <h3>Complete chronological observation history</h3>
+              <p>Scan date is stored as a calendar date only. Where available, the server upload timestamp is shown separately and is not an acquisition time.</p>
+              <div className="observation-table-wrap">
+                <table className="observation-table overall-timeline-table">
+                  <thead><tr><th>#</th><th>Scan ID</th><th>Date / time</th><th>Eye</th><th>Prediction</th><th>AMD probability</th><th>Change from preceding</th><th>Model version</th><th>Scan</th></tr></thead>
+                  <tbody>
+                    {timeline.rows.map((row) => (
+                      <tr key={`${row.scanId}-${row.observationNumber}`}>
+                        <td>{row.observationNumber}</td>
+                        <td>{row.scanId}</td>
+                        <td>{row.date}<small>Scan time not stored{row.uploadTimestamp ? ` · Uploaded ${formatDate(row.uploadTimestamp)}` : ''}</small></td>
+                        <td>{row.eye}</td>
+                        <td>{row.prediction}</td>
+                        <td>{formatProbability(row.probability)}<small>Stored value: {row.probability ?? 'Not available'}</small></td>
+                        <td>
+                          {row.observationNumber === 1
+                            ? '—'
+                            : row.changePp === null
+                              ? 'Not available'
+                              : `${formatPercentagePointChange(row.changePp)}${row.changeComparable ? '' : ' · potentially non-comparable'}`}
+                        </td>
+                        <td>{row.modelVersion || 'Not available'}</td>
+                        <td><button type="button" className="timeline-view-action" onClick={() => onSelectSavedScan(row.scan, patientId, scans)} disabled={historyBusy || row.scan.image_available === false}>Inspect scan</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </>
+        )}
+      <p className="assessment-disclaimer">This timeline summarizes recorded classifier outputs only. Probability differences do not represent a percentage of disease progression and do not independently establish AMD progression, retinal improvement, disease severity, or treatment response.</p>
+    </section>
+  )
+}
+
+function timelineSeriesColor(index) {
+  const colors = ['#5875ba', '#24a58d', '#c18045', '#8b68b1', '#d16b77', '#4d8c9a']
+  return colors[index % colors.length]
+}
+
+function formatTimelineAxisDate(value) {
+  return Number.isFinite(value) ? new Date(value).toISOString().slice(0, 10) : ''
+}
+
+function OverallTimelineDot({ cx, cy, payload, color }) {
+  const count = payload?.sameDateCount || 1
+  const ordinal = payload?.sameDateOrdinal || 0
+  const offset = (ordinal - (count - 1) / 2) * Math.min(6, 24 / count)
+  return <circle cx={cx + offset} cy={cy} r={4} fill={color} stroke="#fff" strokeWidth={1.5} />
+}
+
+function OverallTimelineTooltip({ active, payload }) {
+  if (!active || !payload?.length) return null
+  const point = payload.map((entry) => entry.payload).find((candidate) => candidate?.scanId)
+  if (!point) return null
+  return (
+    <div className="longitudinal-tooltip">
+      <strong>{point.date} · Scan time not recorded</strong>
+      <span>AMD probability: {formatProbability(point.probability)} (stored value: {point.probability ?? 'Not available'})</span>
+      <span>Prediction: {point.prediction}</span>
+      <span>Scan ID: {point.scanId}</span>
+      <span>Eye: {point.eye}</span>
+      <span>Model version: {point.modelVersion || 'Not available'}</span>
+    </div>
   )
 }
 

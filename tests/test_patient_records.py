@@ -272,6 +272,25 @@ class PatientRecordTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(all(record["image_available"] for record in history))
 
+    async def test_history_returns_every_saved_observation_for_longitudinal_timeline(self) -> None:
+        await self._create_patient()
+        saved_scans = []
+        for day in ("2024-01-01", "2024-03-01", "2024-02-01", "2024-02-01", "2024-04-01"):
+            image = _png_bytes((len(saved_scans) + 20, 50, 80))
+            saved_scans.append(await self._save_scan("Patient_001", image, scan_date=day))
+
+        history = backend_app.get_patient_scans("Patient_001")["scans"]
+
+        self.assertEqual(len(history), len(saved_scans))
+        self.assertEqual(
+            {record["scan_id"] for record in history},
+            {record["scan_id"] for record in saved_scans},
+        )
+        self.assertEqual(
+            [record["scan_date"] for record in history],
+            ["2024-01-01", "2024-02-01", "2024-02-01", "2024-03-01", "2024-04-01"],
+        )
+
     async def test_missing_patient_scan_and_invalid_scan_id_errors(self) -> None:
         with self.assertRaises(HTTPException) as caught:
             await backend_app.save_patient_scan(

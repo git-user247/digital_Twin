@@ -661,6 +661,67 @@ h1 em, .project-intro em { color: #647dcc; font-style: normal; }
 .comparison-gradcam > strong { color: #536981; font-size: 10px; }
 .comparison-gradcam img { display: block; width: 100%; max-height: 240px; object-fit: contain; border: 1px solid #e7edf5; border-radius: 8px; background: #101b29; }
 .comparison-gradcam .empty-state { margin: 0; padding: 10px; }
+.amd-progress-assessment { display: grid; gap: 16px; margin: 0 0 17px; }
+.assessment-eye-selector { display: flex; align-items: end; gap: 14px; }
+.assessment-eye-selector label { display: grid; gap: 6px; min-width: 180px; color: #40536c; font-size: 10px; font-weight: 700; }
+.assessment-eye-selector select { min-height: 38px; padding: 8px 10px; border: 1px solid #dfe6f2; border-radius: 8px; color: #334761; background: #fff; font-size: 11px; }
+.assessment-eye-selector > span { padding-bottom: 10px; color: #8290a2; font-size: 10px; }
+.assessment-observation-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.assessment-observation-cards article, .assessment-insufficient > div { display: grid; gap: 7px; min-width: 0; padding: 14px; border: 1px solid #e7edf5; border-radius: 10px; background: #fbfcff; }
+.assessment-observation-cards article > span, .assessment-insufficient > div > span { color: #8290a2; font-size: 10px; }
+.assessment-observation-cards article > strong, .assessment-insufficient > div > strong { color: #344b70; font-size: 17px; }
+.assessment-observation-cards article > small, .assessment-insufficient > div > small { color: #657990; font-size: 10px; overflow-wrap: anywhere; }
+.assessment-change { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 10px; padding: 13px; border: 1px solid #dfe7f4; border-radius: 10px; background: #f7f9ff; }
+.assessment-change > div { display: grid; gap: 6px; min-width: 0; }
+.assessment-change > div span { color: #7889a0; font-size: 10px; }
+.assessment-change > div strong { color: #344b70; font-size: 13px; overflow-wrap: anywhere; text-transform: capitalize; }
+.assessment-change-increased > div:first-child strong { color: #a45d45; }
+.assessment-change-decreased > div:first-child strong { color: #5875ba; }
+.assessment-change-unchanged > div:first-child strong { color: #38836f; }
+.assessment-summary { margin: 0; padding: 12px 14px; border-left: 3px solid #5875ba; border-radius: 0 8px 8px 0; color: #405778; background: #f7f9ff; font-size: 12px; line-height: 1.6; }
+.assessment-warning { margin: 0; line-height: 1.5; }
+.structural-progress-note { padding: 13px 14px; border: 1px solid #e9e2cf; border-radius: 9px; background: #fffdf7; }
+.structural-progress-note strong { color: #725f36; font-size: 11px; }
+.structural-progress-note p { margin: 6px 0 0; color: #817554; font-size: 10px; line-height: 1.55; }
+.assessment-scan-section { display: grid; gap: 12px; padding-top: 15px; border-top: 1px solid #edf1f6; }
+.assessment-scan-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 14px; }
+.assessment-scan-heading h3 { margin: 0 0 5px; color: #344b70; font-size: 13px; }
+.assessment-scan-heading p { margin: 0; color: #8290a2; font-size: 10px; line-height: 1.5; }
+.assessment-scan-heading button { flex: 0 0 auto; }
+.assessment-image-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.assessment-image-card { min-width: 0; padding: 12px; border: 1px solid #e7edf5; border-radius: 10px; background: #fbfcff; }
+.assessment-image-card h4 { margin: 0 0 9px; color: #344b70; font-size: 11px; }
+.assessment-image-card .comparison-image { min-height: 190px; }
+.assessment-image-card .comparison-image .empty-state { padding: 12px; text-align: center; }
+.assessment-scan-prediction { margin: 9px 0 0; color: #536981; font-size: 10px; }
+.assessment-gradcam { display: grid; gap: 7px; margin-top: 11px; padding-top: 10px; border-top: 1px solid #e7edf5; }
+.assessment-gradcam strong { color: #536981; font-size: 10px; }
+.assessment-gradcam img { display: block; width: 100%; max-height: 210px; object-fit: contain; border: 1px solid #e7edf5; border-radius: 8px; background: #101b29; }
+.assessment-gradcam .empty-state { margin: 0; padding: 9px; }
+.assessment-gradcam small { color: #8290a2; font-size: 9px; line-height: 1.5; }
+.assessment-insufficient { display: grid; gap: 10px; }
+.assessment-insufficient > p { margin: 0; color: #6c7d92; font-size: 11px; }
+.assessment-disclaimer { margin: 0; padding-top: 12px; border-top: 1px solid #edf1f6; color: #7889a0; font-size: 10px; line-height: 1.6; }
+.overall-amd-timeline { display: grid; gap: 16px; margin: 0 0 17px; }
+.timeline-intro, .overall-timeline-chart-section > div:first-child p { margin: -7px 0 0; color: #7889a0; font-size: 11px; line-height: 1.55; }
+.timeline-empty { display: grid; gap: 8px; }
+.timeline-empty > p:last-child { margin: 0; color: #7889a0; font-size: 10px; }
+.overall-timeline-summary-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.overall-timeline-summary-grid > div { display: grid; align-content: start; gap: 6px; min-width: 0; padding: 12px; border: 1px solid #e7edf5; border-radius: 9px; background: #fbfcff; }
+.overall-timeline-summary-grid span { color: #8290a2; font-size: 10px; }
+.overall-timeline-summary-grid strong { color: #344b70; font-size: 14px; overflow-wrap: anywhere; }
+.overall-timeline-summary-grid small { color: #8290a2; font-size: 9px; overflow-wrap: anywhere; }
+.overall-timeline-wording { line-height: 1.65; }
+.overall-timeline-chart-section { display: grid; gap: 10px; padding-top: 15px; border-top: 1px solid #edf1f6; }
+.overall-timeline-chart-section h3 { margin: 0 0 6px; color: #344b70; font-size: 13px; }
+.overall-timeline-chart { width: 100%; height: 340px; min-width: 0; }
+.same-date-marker-note { margin: 0; color: #8290a2; font-size: 9px; line-height: 1.5; }
+.overall-timeline-table { min-width: 1180px; }
+.overall-timeline-table td:nth-child(3) { max-width: none; white-space: normal; }
+.overall-timeline-table td:nth-child(3) small, .overall-timeline-table td:nth-child(6) small { display: block; margin-top: 4px; color: #8290a2; font-size: 9px; line-height: 1.45; }
+.timeline-view-action { padding: 5px 8px; border: 1px solid #dfe6f2; border-radius: 6px; color: #435e9f; background: #fff; font-size: 9px; font-weight: 700; cursor: pointer; }
+.timeline-view-action:hover:not(:disabled) { background: #edf2ff; }
+.timeline-view-action:disabled { color: #aab4c2; cursor: not-allowed; }
 
 @media (max-width: 1050px) {
   .patient-directory-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -669,6 +730,11 @@ h1 em, .project-intro em { color: #647dcc; font-style: normal; }
 }
 @media (max-width: 760px) {
   .longitudinal-chart-panels { grid-template-columns: 1fr; }
+  .overall-timeline-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .assessment-observation-cards, .assessment-image-grid { grid-template-columns: 1fr; }
+  .assessment-change { grid-template-columns: 1fr; }
+  .assessment-scan-heading { align-items: flex-start; flex-direction: column; }
+  .assessment-scan-heading button { width: 100%; justify-content: center; }
   .longitudinal-chart-heading { align-items: flex-start; flex-direction: column; }
   .longitudinal-chart-heading label { width: 100%; }
   .prediction-change-heading { align-items: flex-start; flex-direction: column; }
@@ -707,5 +773,7 @@ h1 em, .project-intro em { color: #647dcc; font-style: normal; }
   .saved-scan-result .probability-comparison { grid-template-columns: 1fr; }
   .latest-probabilities, .scan-comparison-grid { grid-template-columns: 1fr; }
   .longitudinal-chart { height: 230px; }
+  .overall-timeline-chart { height: 270px; }
+  .overall-timeline-summary-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 430px) { .overview-grid { grid-template-columns: 1fr 1fr; }.overview-card p { min-height: 27px; }.hero-copy { font-size: 13px; }.observation-quote { font-size: 18px; }.selected-file { align-items: flex-start; flex-wrap: wrap; }.analyze-button { margin-left: 0; width: 100%; justify-content: center; }.prediction-result { flex-wrap: wrap; }.risk-pill { margin-left: 47px; }.twin-details { gap: 5px; }.twin-details strong { font-size: 10px; } }
